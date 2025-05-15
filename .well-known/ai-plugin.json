@@ -1,0 +1,18 @@
+
+{
+  "schema_version": "v1",
+  "name_for_human": "RIG Calendar",
+  "name_for_model": "rig_calendar",
+  "description_for_human": "Consulta la disponibilidad de RIG Quiropráctico.",
+  "description_for_model": "Devuelve los horarios disponibles en la consulta de RIG Quiropráctico entre fechas dadas.",
+  "auth": {
+    "type": "none"
+  },
+  "api": {
+    "type": "openapi",
+    "url": "https://rig-calendar.vercel.app/openapi.yaml"
+  },
+  "logo_url": "https://rig-calendar.vercel.app/logo.png",
+  "contact_email": "roberto.ibacache@gmail.com",
+  "legal_info_url": "https://rig-calendar.vercel.app/legal"
+}

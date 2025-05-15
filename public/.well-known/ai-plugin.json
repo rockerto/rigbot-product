@@ -1,0 +1,18 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "RIG Calendar Bot",
+  "name_for_model": "rigCalendar",
+  "description_for_human": "Agendamiento autom\u00e1tico de sesiones quiropr\u00e1cticas con RIG.",
+  "description_for_model": "Permite consultar disponibilidad y agendar horas con RIG en Copiap\u00f3.",
+  "auth": {
+    "type": "none"
+  },
+  "api": {
+    "type": "openapi",
+    "url": "https://rig-calendar.vercel.app/openapi.yaml",
+    "is_user_authenticated": false
+  },
+  "logo_url": "https://rig-calendar.vercel.app/logo.png",
+  "contact_email": "horaskinepraxis@gmail.com",
+  "legal_info_url": "https://rig-calendar.vercel.app/legal"
+}

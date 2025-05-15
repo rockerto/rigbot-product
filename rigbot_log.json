@@ -1,0 +1,12 @@
+[
+  {
+    "timestamp": "2025-04-22T18:56:48.992026",
+    "tipo": "mensaje_entrante",
+    "mensaje": "Hola, quiero reservar para el jueves",
+    "resultado": "pendiente",
+    "paciente": "",
+    "telefono": "",
+    "hora_solicitada": "",
+    "observaciones": ""
+  }
+]

@@ -1,0 +1,47 @@
+# Node modules
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Vercel local settings
+.vercel/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Sensitive files
+.env
+.env.local
+.env.production
+.env.development
+credentials.json
+get-refresh-token.js
+llaves.zip
+
+# IDE / Editor settings
+.DS_Store
+.idea/
+.vscode/
+# Node modules
+node_modules/
+
+# Mac OS files
+.DS_Store
+
+# Sensitive files
+token.json
+client_secret.json
+authorize.cjs
+
+# Environment variables
+.env
+llaves.zip
+node_modules/
+.env
+credentials.json
+get-refresh-token.js
+*.zip

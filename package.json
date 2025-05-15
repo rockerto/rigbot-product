@@ -1,0 +1,29 @@
+{
+  "name": "rigbot-1.0",
+  "version": "1.0.0",
+  "description": "Asistente virtual que consulta disponibilidad desde Google Calendar y deriva al WhatsApp de RigQuiropráctico",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "date-fns": "^4.1.0",
+    "date-fns-tz": "^3.2.0",
+    "googleapis": "^105.0.0",
+    "next": "14.1.4",
+    "openai": "^4.97.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
+  "keywords": [
+    "rigbot",
+    "google calendar",
+    "whatsapp",
+    "assistant",
+    "vercel"
+  ],
+  "author": "Roberto Ibacache",
+  "license": "MIT"
+}

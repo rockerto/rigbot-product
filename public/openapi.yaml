@@ -1,0 +1,51 @@
+openapi: 3.1.0
+info:
+  title: RIG Calendar API
+  description: API para consultar y agendar horas con RIG.
+  version: 1.0.0
+servers:
+  - url: https://rigbot-1-0.vercel.app
+paths:
+  /api/getavailableappointments:
+    post:
+      summary: Obtener disponibilidad de horas
+      operationId: getAvailableAppointments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                start_date:
+                  type: string
+                  format: date
+                end_date:
+                  type: string
+                  format: date
+                preferred_time:
+                  type: string
+                  example: "16:00"
+                  description: Hora preferida del paciente (opcional, formato HH:mm)
+              required:
+                - start_date
+                - end_date
+      responses:
+        '200':
+          description: Lista de horarios disponibles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  suggested:
+                    type: array
+                    items:
+                      type: string
+                  exact:
+                    type: string
+                    nullable: true
+                  nearby:
+                    type: array
+                    items:
+                      type: string
