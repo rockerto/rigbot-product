@@ -45,3 +45,5 @@ node_modules/
 credentials.json
 get-refresh-token.js
 *.zip
+.env.local
+serviceAccountKey.json
