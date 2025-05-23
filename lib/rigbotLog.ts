@@ -1,7 +1,6 @@
-import { getFirestore } from "firebase-admin/firestore";
-import { app } from "./firebase-admin";
+// lib/rigbotLog.ts (22 mayo 2025, 21:42 hrs)
 
-const db = getFirestore(app);
+import { db } from "./firebase-admin"; // ✅ Ya no necesitamos importar `app`, solo `db`
 
 interface RigbotMessage {
   role: "user" | "assistant";
