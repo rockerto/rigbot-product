@@ -5,9 +5,7 @@ import { logRigbotMessage } from "@/lib/rigbotLog";
 import { DEFAULT_SYSTEM_PROMPT_TEMPLATE } from '@/lib/defaultSystemPromptTemplate';
 import { db } from '@/lib/firebase-admin'; // db se inicializa en firebase-admin.ts
 
-// ***** IMPORTACIÓN CLAVE PARA FIRESTORE FUNCTIONS *****
-import { doc, getDoc } from 'firebase-admin/firestore'; 
-// Ya no usamos los alias getFirestoreDoc y getFirestoreDocSnapshot para simplificar
+// YA NO NECESITAMOS IMPORTAR 'doc' y 'getDoc' aquí porque usaremos los métodos de la instancia 'db'
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -40,11 +38,11 @@ async function getClientConfig(clientId) {
     return null;
   }
   try {
-    // Usamos 'doc' y 'getDoc' importados directamente
-    const clientDocRef = doc(db, 'clients', clientId); 
-    const clientDocSnap = await getDoc(clientDocRef); 
+    // ***** CORRECCIÓN DE RIGO APLICADA *****
+    const clientDocRef = db.collection('clients').doc(clientId); 
+    const clientDocSnap = await clientDocRef.get(); 
 
-    if (clientDocSnap.exists()) {
+    if (clientDocSnap.exists) { // Es .exists, no .exists() para Admin SDK snapshot
       console.log(`getClientConfig: Configuración encontrada para clientId: ${clientId}`);
       return clientDocSnap.data();
     } else {
@@ -101,7 +99,7 @@ export default async function handler(req, res) {
     if (corsOriginSet) {
         return res.status(204).end(); 
     } else {
-        console.warn("WARN CORS: Solicitud OPTIONS de origen no permitido:", requestOrigin, "va a ser bloqueada por el navegador si no es same-origin.");
+        console.warn("WARN CORS: Solicitud OPTIONS de origen no permitido:", requestOrigin, "será bloqueada por el navegador si no es same-origin.");
         return res.status(403).json({ error: "Origen no permitido por CORS."}); 
     }
   }
@@ -114,12 +112,12 @@ export default async function handler(req, res) {
   const currentSessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
   if (!db) { 
-      console.error("FATAL en chat.js: Instancia de Firestore (db) NO DISPONIBLE desde firebase-admin.ts. Firebase Admin SDK probablemente no se inicializó correctamente debido a error de credenciales. Revisa GOOGLE_APPLICATION_CREDENTIALS en Vercel para rigbot-product.");
+      console.error("FATAL en chat.js: Instancia de Firestore (db) NO DISPONIBLE desde firebase-admin.ts. Firebase Admin SDK probablemente no se inicializó correctamente. Revisa GOOGLE_APPLICATION_CREDENTIALS en Vercel para rigbot-product.");
       const errorResponsePayload = { error: 'Error interno crítico del servidor. Contacta al administrador.' };
       return res.status(500).json(errorResponsePayload);
   }
 
-  const clientConfigData = await getClientConfig(requestClientId);
+  const clientConfigData = await getClientConfig(requestClientId); 
   let effectiveConfig = { ...defaultConfig };
 
   if (clientConfigData) {
