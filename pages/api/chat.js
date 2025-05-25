@@ -1,13 +1,15 @@
 // rigbot-product/pages/api/chat.js
-import { getCalendarClient } from '@/lib/google';
+import { getCalendarClient } from '@/lib/google'; // Asegúrate que la ruta sea correcta
 import OpenAI from 'openai';
-import { logRigbotMessage } from "@/lib/rigbotLog"; 
-import { DEFAULT_SYSTEM_PROMPT_TEMPLATE } from '@/lib/defaultSystemPromptTemplate';
-import { db } from '@/lib/firebase-admin'; // <--- IMPORTANTE: Importamos db desde el módulo corregido
+import { logRigbotMessage } from "@/lib/rigbotLog";  // Asegúrate que la ruta sea correcta
+import { DEFAULT_SYSTEM_PROMPT_TEMPLATE } from '@/lib/defaultSystemPromptTemplate'; // Asegúrate que la ruta sea correcta
+import { db } from '@/lib/firebase-admin'; // Importamos db desde el módulo firebase-admin.ts corregido
 
-// --- Firebase Admin Setup ---
-// YA NO SE INICIALIZA FIREBASE ADMIN AQUÍ, SE USA EL 'db' IMPORTADO DE @/lib/firebase-admin
-// --- End Firebase Admin Setup ---
+// --- IMPORTACIÓN CORREGIDA PARA FIRESTORE ---
+import { doc as getFirestoreDoc, getDoc as getFirestoreDocSnapshot } from 'firebase-admin/firestore'; 
+// Renombré para evitar cualquier posible colisión de nombres, aunque 'doc' y 'getDoc' también funcionarían
+// si no tienes otras variables con esos nombres en este alcance.
+// --- FIN IMPORTACIÓN CORREGIDA ---
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -18,11 +20,11 @@ const CHILE_UTC_OFFSET_HOURS = -4;
 const WHATSAPP_FALLBACK_PLACEHOLDER = "+56900000000";
 
 const defaultConfig = {
-  basePrompt: process.env.RIGBOT_PROMPT || DEFAULT_SYSTEM_PROMPT_TEMPLATE, // RIGBOT_PROMPT en Vercel para rigbot-product debería estar ELIMINADO para priorizar Firestore
+  basePrompt: process.env.RIGBOT_PROMPT || DEFAULT_SYSTEM_PROMPT_TEMPLATE,
   calendarQueryDays: 7,
   calendarMaxUserRequestDays: 21,
   maxSuggestions: 5,
-  whatsappNumber: process.env.RIGBOT_DEFAULT_WSP || WHATSAPP_FALLBACK_PLACEHOLDER, // RIGBOT_DEFAULT_WSP es para el fallback si Firestore no tiene número
+  whatsappNumber: process.env.RIGBOT_DEFAULT_WSP || WHATSAPP_FALLBACK_PLACEHOLDER,
   pricingInfo: "Nuestros precios son competitivos. Por favor, consulta al contactarnos.",
   direccion: "Nuestra consulta está en Copiapó. Te daremos los detalles exactos al agendar.",
   horario: "Atendemos de Lunes a Viernes, de 10:00 a 19:30.",
@@ -35,14 +37,15 @@ async function getClientConfig(clientId) {
     console.log("getClientConfig: No clientId provided, returning null.");
     return null;
   }
-  // Ahora 'db' viene del import y ya debería estar inicializada (o ser null si falló la init global)
   if (!db || typeof db.collection !== 'function') { 
     console.error("getClientConfig: Firestore db no está disponible desde firebase-admin.ts. No se puede obtener configuración.");
     return null;
   }
   try {
-    const clientDocRef = doc(db, 'clients', clientId);
-    const clientDocSnap = await getDoc(clientDocRef);
+    // Usamos los nombres importados y renombrados
+    const clientDocRef = getFirestoreDoc(db, 'clients', clientId); 
+    const clientDocSnap = await getFirestoreDocSnapshot(clientDocRef); 
+
     if (clientDocSnap.exists()) {
       console.log(`getClientConfig: Configuración encontrada para clientId: ${clientId}`);
       return clientDocSnap.data();
@@ -72,8 +75,6 @@ function getDayIdentifier(dateObj, timeZone) {
 
 export default async function handler(req, res) {
   // --- INICIO Manejo de CORS Mejorado ---
-  // Configura esta variable en Vercel para rigbot-product: ALLOWED_ORIGINS="https://rigsite-web.vercel.app"
-  // Si necesitas múltiples orígenes: "https://dominio1.com,http://localhost:3001"
   const allowedOriginsString = process.env.ALLOWED_ORIGINS || "https://rigsite-web.vercel.app"; 
   const allowedOrigins = allowedOriginsString.split(',').map(origin => origin.trim());
   const requestOrigin = req.headers.origin;
@@ -84,14 +85,6 @@ export default async function handler(req, res) {
       res.setHeader('Access-Control-Allow-Origin', requestOrigin);
       corsOriginSet = true;
     } else if (process.env.NODE_ENV === 'development' && requestOrigin.startsWith('http://localhost:')) {
-      // Permite cualquier localhost en desarrollo si no está en ALLOWED_ORIGINS
-      // Asegúrate de que el puerto de tu rigsite-web local esté aquí si pruebas contra rigbot-product desplegado.
-      // Por ejemplo, si rigsite-web corre en 3000, y quieres permitirlo:
-      // if (requestOrigin === 'http://localhost:3000') {
-      //    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
-      //    corsOriginSet = true;
-      // }
-      // Para ser más general en desarrollo local:
       res.setHeader('Access-Control-Allow-Origin', requestOrigin);
       corsOriginSet = true;
       console.log("INFO CORS: Origen localhost de desarrollo permitido:", requestOrigin);
@@ -112,8 +105,7 @@ export default async function handler(req, res) {
         return res.status(204).end(); 
     } else {
         console.warn("WARN CORS: Solicitud OPTIONS de origen no permitido:", requestOrigin, "va a ser bloqueada por el navegador si no es same-origin.");
-        // Aunque devolvamos 204, si el 'Access-Control-Allow-Origin' no se seteó para este origin, el preflight fallará en el navegador.
-        return res.status(204).end(); 
+        return res.status(403).json({ error: "Origen no permitido por CORS."}); 
     }
   }
   // --- FIN Manejo de CORS Mejorado ---
@@ -125,11 +117,9 @@ export default async function handler(req, res) {
   const ipAddress = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null;
   const currentSessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
-  // VERIFICACIÓN CRÍTICA de 'db' importado desde firebase-admin.ts
   if (!db) { 
       console.error("FATAL en chat.js: Instancia de Firestore (db) NO DISPONIBLE desde firebase-admin.ts. Firebase Admin SDK probablemente no se inicializó correctamente debido a error de credenciales. Revisa GOOGLE_APPLICATION_CREDENTIALS en Vercel para rigbot-product.");
       const errorResponsePayload = { error: 'Error interno crítico del servidor. Contacta al administrador.' };
-      // No podemos loguear a Firestore si db no está.
       return res.status(500).json(errorResponsePayload);
   }
 
@@ -220,7 +210,7 @@ export default async function handler(req, res) {
       console.log('⏳ Detectada consulta de calendario para', requestClientId);
       let calendar;
       try {
-        calendar = await getCalendarClient(); // Esto usa las credenciales GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, etc.
+        calendar = await getCalendarClient();
         if (!calendar || typeof calendar.events?.list !== 'function') {
           console.error("DEBUG ERROR: getCalendarClient() no devolvió un cliente de calendario válido para", requestClientId);
           throw new Error("Cliente de calendario no inicializado correctamente.");
@@ -528,7 +518,7 @@ export default async function handler(req, res) {
     console.log(`System Prompt para OpenAI (clientId: ${requestClientId}, primeros 500 chars):`, finalSystemPrompt.substring(0, 500) + "...");
 
     const chatResponse = await openai.chat.completions.create({
-      model: MODEL_FALLBACK,
+      model: MODEL_FALLBACK, // Podrías hacerlo configurable: effectiveConfig.openaiModel
       messages: [
         { role: 'system', content: finalSystemPrompt },
         { role: 'user', content: message }
