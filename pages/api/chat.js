@@ -1,45 +1,12 @@
 // rigbot-product/pages/api/chat.js
-import { getCalendarClient } from '@/lib/google'; // Asegúrate que esta ruta sea correcta
+import { getCalendarClient } from '@/lib/google';
 import OpenAI from 'openai';
-import { logRigbotMessage } from "@/lib/rigbotLog"; // Asegúrate que esta ruta sea correcta
-import { DEFAULT_SYSTEM_PROMPT_TEMPLATE } from '@/lib/defaultSystemPromptTemplate'; // Asegúrate que esta ruta sea correcta
+import { logRigbotMessage } from "@/lib/rigbotLog"; 
+import { DEFAULT_SYSTEM_PROMPT_TEMPLATE } from '@/lib/defaultSystemPromptTemplate';
+import { db } from '@/lib/firebase-admin'; // <--- IMPORTANTE: Importamos db desde el módulo corregido
 
 // --- Firebase Admin Setup ---
-import { getFirestore, doc, getDoc } from 'firebase-admin/firestore';
-import { initializeApp as initializeAdminAppFirebase, getApps as getAdminAppsFirebase, cert } from 'firebase-admin/app'; // Renombré para evitar colisión si usaras firebase/app (cliente)
-
-if (!getAdminAppsFirebase().length) {
-  try {
-    const serviceAccountString = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-    if (!serviceAccountString || serviceAccountString.trim() === "") {
-      throw new Error("La variable de entorno GOOGLE_APPLICATION_CREDENTIALS no está definida o está vacía.");
-    }
-    // Parseamos el string JSON a un objeto
-    const serviceAccount = JSON.parse(serviceAccountString); 
-    
-    initializeAdminAppFirebase({ // Usar el nombre importado
-      credential: cert(serviceAccount) // Usamos cert() para pasar el objeto parseado
-    });
-    console.log("Firebase Admin SDK inicializado con credenciales parseadas explícitamente.");
-  } catch (e) {
-    console.error("Error CRÍTICO inicializando Firebase Admin SDK:", e);
-    if (e.message.includes("GOOGLE_APPLICATION_CREDENTIALS no está definida")) {
-        console.error("CAUSA PROBABLE: La variable de entorno GOOGLE_APPLICATION_CREDENTIALS está vacía o no existe en Vercel para el proyecto rigbot-product.");
-    } else if (e instanceof SyntaxError) { // Error al parsear el JSON
-        console.error("CAUSA PROBABLE: El contenido de GOOGLE_APPLICATION_CREDENTIALS no es un JSON válido. Asegúrate de pegar el contenido COMPLETO y EXACTO del archivo JSON de tu clave de servicio. Verifica que no haya caracteres extraños o que esté incompleto. Primeros/últimos chars problemáticos:", process.env.GOOGLE_APPLICATION_CREDENTIALS?.substring(0,100), "...", process.env.GOOGLE_APPLICATION_CREDENTIALS?.slice(-100));
-    } else {
-        console.error("CAUSA PROBABLE: Otro error durante la inicialización del SDK Admin. Revisa el stack trace y el valor de GOOGLE_APPLICATION_CREDENTIALS en Vercel.");
-    }
-  }
-}
-
-let db;
-try {
-    db = getFirestore();
-} catch (e) {
-    console.error("Error obteniendo instancia de Firestore (getFirestore()) DESPUÉS de intento de inicialización:", e);
-    // db seguirá undefined, se verificará más adelante antes de usar.
-}
+// YA NO SE INICIALIZA FIREBASE ADMIN AQUÍ, SE USA EL 'db' IMPORTADO DE @/lib/firebase-admin
 // --- End Firebase Admin Setup ---
 
 const openai = new OpenAI({
@@ -51,11 +18,11 @@ const CHILE_UTC_OFFSET_HOURS = -4;
 const WHATSAPP_FALLBACK_PLACEHOLDER = "+56900000000";
 
 const defaultConfig = {
-  basePrompt: process.env.RIGBOT_PROMPT || DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+  basePrompt: process.env.RIGBOT_PROMPT || DEFAULT_SYSTEM_PROMPT_TEMPLATE, // RIGBOT_PROMPT en Vercel para rigbot-product debería estar ELIMINADO para priorizar Firestore
   calendarQueryDays: 7,
   calendarMaxUserRequestDays: 21,
   maxSuggestions: 5,
-  whatsappNumber: process.env.RIGBOT_DEFAULT_WSP || WHATSAPP_FALLBACK_PLACEHOLDER,
+  whatsappNumber: process.env.RIGBOT_DEFAULT_WSP || WHATSAPP_FALLBACK_PLACEHOLDER, // RIGBOT_DEFAULT_WSP es para el fallback si Firestore no tiene número
   pricingInfo: "Nuestros precios son competitivos. Por favor, consulta al contactarnos.",
   direccion: "Nuestra consulta está en Copiapó. Te daremos los detalles exactos al agendar.",
   horario: "Atendemos de Lunes a Viernes, de 10:00 a 19:30.",
@@ -68,8 +35,9 @@ async function getClientConfig(clientId) {
     console.log("getClientConfig: No clientId provided, returning null.");
     return null;
   }
-  if (!db || typeof db.collection !== 'function') {
-    console.error("getClientConfig: Firestore db no está inicializado o no es una instancia válida. Firebase Admin SDK pudo fallar al iniciar o GOOGLE_APPLICATION_CREDENTIALS es incorrecta.");
+  // Ahora 'db' viene del import y ya debería estar inicializada (o ser null si falló la init global)
+  if (!db || typeof db.collection !== 'function') { 
+    console.error("getClientConfig: Firestore db no está disponible desde firebase-admin.ts. No se puede obtener configuración.");
     return null;
   }
   try {
@@ -104,44 +72,48 @@ function getDayIdentifier(dateObj, timeZone) {
 
 export default async function handler(req, res) {
   // --- INICIO Manejo de CORS Mejorado ---
-  const allowedOriginsString = process.env.ALLOWED_ORIGINS || "https://rigsite-web.vercel.app"; // Fallback a tu frontend principal
+  // Configura esta variable en Vercel para rigbot-product: ALLOWED_ORIGINS="https://rigsite-web.vercel.app"
+  // Si necesitas múltiples orígenes: "https://dominio1.com,http://localhost:3001"
+  const allowedOriginsString = process.env.ALLOWED_ORIGINS || "https://rigsite-web.vercel.app"; 
   const allowedOrigins = allowedOriginsString.split(',').map(origin => origin.trim());
   const requestOrigin = req.headers.origin;
-  let corsOriginAllowed = false;
+  let corsOriginSet = false;
 
   if (requestOrigin) {
     if (allowedOrigins.includes(requestOrigin)) {
       res.setHeader('Access-Control-Allow-Origin', requestOrigin);
-      corsOriginAllowed = true;
+      corsOriginSet = true;
     } else if (process.env.NODE_ENV === 'development' && requestOrigin.startsWith('http://localhost:')) {
+      // Permite cualquier localhost en desarrollo si no está en ALLOWED_ORIGINS
+      // Asegúrate de que el puerto de tu rigsite-web local esté aquí si pruebas contra rigbot-product desplegado.
+      // Por ejemplo, si rigsite-web corre en 3000, y quieres permitirlo:
+      // if (requestOrigin === 'http://localhost:3000') {
+      //    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+      //    corsOriginSet = true;
+      // }
+      // Para ser más general en desarrollo local:
       res.setHeader('Access-Control-Allow-Origin', requestOrigin);
-      corsOriginAllowed = true;
+      corsOriginSet = true;
       console.log("INFO CORS: Origen localhost de desarrollo permitido:", requestOrigin);
     } else {
-      console.warn("WARN CORS: Origen no permitido:", requestOrigin, "| Permitidos:", allowedOrigins.join(' '));
+      console.warn("WARN CORS: Origen no está en la lista de permitidos y no es localhost dev:", requestOrigin, "| Permitidos:", allowedOrigins.join(' '));
     }
   } else {
-    console.log("INFO CORS: No se detectó header 'origin' en la solicitud.");
-    // Para solicitudes same-origin o sin origin (como Postman a veces), no se necesita el header
-    // Pero si esperas cross-origin y no viene, es raro.
+    console.log("INFO CORS: No se detectó header 'origin'. Se asume same-origin o no-CORS (ej. Postman).");
   }
   
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Client-ID, Authorization');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); 
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Client-ID, Authorization'); 
+  res.setHeader('Access-Control-Allow-Credentials', 'true'); 
 
   if (req.method === 'OPTIONS') {
-    console.log("INFO: Recibida solicitud OPTIONS para CORS preflight desde:", requestOrigin, "| CORS permitido para origin?:", corsOriginAllowed);
-    // Si el origen no fue permitido arriba y es una solicitud OPTIONS, podría fallar aquí.
-    // Para OPTIONS, es crucial que Access-Control-Allow-Origin se setee si el origin es válido.
-    // Si finalAllowedOrigin no se seteó, la respuesta OPTIONS no tendrá el header y fallará el preflight.
-    if (corsOriginAllowed) {
+    console.log("INFO: Recibida solicitud OPTIONS para CORS preflight desde:", requestOrigin, "| CORS permitido para origin?:", corsOriginSet);
+    if (corsOriginSet) {
         return res.status(204).end(); 
     } else {
-        // Si el origen no está en la lista y es una petición OPTIONS, es un preflight fallido.
-        // Aún así, Vercel podría manejar esto antes de llegar aquí si el path no machea un allowed origin en config de Vercel.
-        console.warn("WARN CORS: Solicitud OPTIONS de origen no permitido bloqueada:", requestOrigin);
-        return res.status(403).json({ error: "Origen no permitido por CORS." }); // O simplemente 204, pero el navegador lo bloqueará igual si no hay header
+        console.warn("WARN CORS: Solicitud OPTIONS de origen no permitido:", requestOrigin, "va a ser bloqueada por el navegador si no es same-origin.");
+        // Aunque devolvamos 204, si el 'Access-Control-Allow-Origin' no se seteó para este origin, el preflight fallará en el navegador.
+        return res.status(204).end(); 
     }
   }
   // --- FIN Manejo de CORS Mejorado ---
@@ -153,9 +125,11 @@ export default async function handler(req, res) {
   const ipAddress = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null;
   const currentSessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
-  if (!db || typeof db.collection !== 'function') {
-      console.error("FATAL: Firestore DB no está disponible. Revise inicialización de Firebase Admin SDK y GOOGLE_APPLICATION_CREDENTIALS en Vercel para rigbot-product.");
-      const errorResponsePayload = { error: 'Error interno del servidor: No se pudo conectar a la base de datos de configuración.' };
+  // VERIFICACIÓN CRÍTICA de 'db' importado desde firebase-admin.ts
+  if (!db) { 
+      console.error("FATAL en chat.js: Instancia de Firestore (db) NO DISPONIBLE desde firebase-admin.ts. Firebase Admin SDK probablemente no se inicializó correctamente debido a error de credenciales. Revisa GOOGLE_APPLICATION_CREDENTIALS en Vercel para rigbot-product.");
+      const errorResponsePayload = { error: 'Error interno crítico del servidor. Contacta al administrador.' };
+      // No podemos loguear a Firestore si db no está.
       return res.status(500).json(errorResponsePayload);
   }
 
@@ -209,16 +183,15 @@ export default async function handler(req, res) {
     return " ¡Contáctanos para coordinar!";
   };
 
-  // Ya manejamos OPTIONS arriba, esta verificación es para otros métodos.
-  if (req.method !== 'POST') { 
+  if (req.method !== 'POST') {
     const errorResponsePayload = { error: 'Método no permitido' };
-    if (typeof logRigbotMessage === "function") { await logRigbotMessage({ role: "assistant", content: `Error: ${errorResponsePayload.error}`, sessionId: currentSessionId, ip: ipAddress }); }
+    if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error: ${errorResponsePayload.error}`, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
     return res.status(405).json(errorResponsePayload);
   }
 
   if (!message) {
     const errorResponsePayload = { error: 'Falta el mensaje del usuario' };
-    if (typeof logRigbotMessage === "function") { await logRigbotMessage({ role: "assistant", content: `Error: ${errorResponsePayload.error}`, sessionId: currentSessionId, ip: ipAddress }); }
+    if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error: ${errorResponsePayload.error}`, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
     return res.status(400).json(errorResponsePayload);
   }
 
@@ -247,7 +220,7 @@ export default async function handler(req, res) {
       console.log('⏳ Detectada consulta de calendario para', requestClientId);
       let calendar;
       try {
-        calendar = await getCalendarClient();
+        calendar = await getCalendarClient(); // Esto usa las credenciales GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, etc.
         if (!calendar || typeof calendar.events?.list !== 'function') {
           console.error("DEBUG ERROR: getCalendarClient() no devolvió un cliente de calendario válido para", requestClientId);
           throw new Error("Cliente de calendario no inicializado correctamente.");
@@ -256,7 +229,7 @@ export default async function handler(req, res) {
       } catch (clientError) {
         console.error("❌ Error al obtener el cliente de Google Calendar para", requestClientId, ":", clientError);
         const errorResponsePayload = { error: 'No se pudo conectar con el servicio de calendario.', details: clientError.message };
-        if (typeof logRigbotMessage === "function") { await logRigbotMessage({ role: "assistant", content: `Error interno: ${errorResponsePayload.error} Detalles: ${errorResponsePayload.details}`, sessionId: currentSessionId, ip: ipAddress });}
+        if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno: ${errorResponsePayload.error} Detalles: ${errorResponsePayload.details}`, sessionId: currentSessionId, ip: ipAddress });} catch(e){console.error("Log Error:",e)} }
         return res.status(500).json(errorResponsePayload);
       }
       
@@ -315,7 +288,7 @@ export default async function handler(req, res) {
         if (targetDateForDisplay >= futureLimitCheckDate) {
           const formattedDateAsked = new Intl.DateTimeFormat('es-CL', { dateStyle: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay);
           let reply = `¡Entiendo que buscas para el ${formattedDateAsked}! 😊 Por ahora, mi calendario mental solo llega hasta unos ${effectiveConfig.calendarMaxUserRequestDays} días en el futuro.${getWhatsappContactMessage(effectiveConfig.whatsappNumber)} y mis colegas humanos te ayudarán con gusto.`;
-          if (typeof logRigbotMessage === "function") { await logRigbotMessage({ role: "assistant", content: reply, sessionId: currentSessionId, ip: ipAddress }); }
+          if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: reply, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
           return res.status(200).json({ response: reply });
         }
       }
@@ -361,7 +334,7 @@ export default async function handler(req, res) {
             replyPreamble = `¡Ojo! 👀 Parece que el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
           }
           let reply = `${replyPreamble} está fuera de nuestro horario de atención (${effectiveConfig.horario}). ¿Te gustaría buscar dentro de ese rango?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)}`;
-          if (typeof logRigbotMessage === "function") { await logRigbotMessage({ role: "assistant", content: reply, sessionId: currentSessionId, ip: ipAddress }); }
+          if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: reply, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
           return res.status(200).json({ response: reply });
         }
       }
@@ -385,7 +358,7 @@ export default async function handler(req, res) {
       } catch (googleError) {
         console.error(`❌ ERROR DIRECTO en calendar.events.list para ${requestClientId}:`, googleError);
         const errorResponsePayload = { error: 'Error al consultar el calendario de Google.', details: googleError.message };
-        if (typeof logRigbotMessage === "function") { await logRigbotMessage({ role: "assistant", content: `Error interno: ${errorResponsePayload.error} Detalles: ${errorResponsePayload.details}`, sessionId: currentSessionId, ip: ipAddress });}
+        if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno: ${errorResponsePayload.error} Detalles: ${errorResponsePayload.details}`, sessionId: currentSessionId, ip: ipAddress });} catch(e){console.error("Log Error:",e)} }
         return res.status(500).json(errorResponsePayload);
       }
           
@@ -532,7 +505,7 @@ export default async function handler(req, res) {
       }
 
       console.log('✅ Respuesta generada (Calendario):', replyCalendar);
-      if (typeof logRigbotMessage === "function") { await logRigbotMessage({ role: "assistant", content: replyCalendar, sessionId: currentSessionId, ip: ipAddress }); }
+      if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: replyCalendar, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
       return res.status(200).json({ response: replyCalendar });
     }
 
@@ -555,7 +528,7 @@ export default async function handler(req, res) {
     console.log(`System Prompt para OpenAI (clientId: ${requestClientId}, primeros 500 chars):`, finalSystemPrompt.substring(0, 500) + "...");
 
     const chatResponse = await openai.chat.completions.create({
-      model: MODEL_FALLBACK, // Podrías hacerlo configurable: effectiveConfig.openaiModel
+      model: MODEL_FALLBACK,
       messages: [
         { role: 'system', content: finalSystemPrompt },
         { role: 'user', content: message }
@@ -565,14 +538,14 @@ export default async function handler(req, res) {
     let gptReply = chatResponse.choices[0].message.content.trim();
     
     console.log('✅ Respuesta generada (OpenAI):', gptReply);
-    if (typeof logRigbotMessage === "function") { await logRigbotMessage({ role: "assistant", content: gptReply, sessionId: currentSessionId, ip: ipAddress }); }
+    if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: gptReply, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
     return res.status(200).json({ response: gptReply });
 
   } catch (error) {
     console.error(`❌ Error en Rigbot para clientId ${requestClientId}:`, error);
     console.error(error.stack);
     const errorForUser = 'Ocurrió un error inesperado en Rigbot. Por favor, intenta más tarde o contacta a soporte si el problema persiste.';
-    if (typeof logRigbotMessage === "function") { await logRigbotMessage({ role: "assistant", content: `Error interno: ${error.message}. UserMsg: ${errorForUser}`, sessionId: currentSessionId, ip: ipAddress }); }
+    if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno: ${error.message}. UserMsg: ${errorForUser}`, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
     return res.status(500).json({ error: errorForUser, details: process.env.NODE_ENV === 'development' ? error.message + (error.stack ? `\nStack: ${error.stack.substring(0,300)}...` : '') : undefined });
   }
 }
