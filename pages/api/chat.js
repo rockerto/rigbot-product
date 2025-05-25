@@ -1,15 +1,13 @@
 // rigbot-product/pages/api/chat.js
-import { getCalendarClient } from '@/lib/google'; // Asegúrate que la ruta sea correcta
+import { getCalendarClient } from '@/lib/google';
 import OpenAI from 'openai';
-import { logRigbotMessage } from "@/lib/rigbotLog";  // Asegúrate que la ruta sea correcta
-import { DEFAULT_SYSTEM_PROMPT_TEMPLATE } from '@/lib/defaultSystemPromptTemplate'; // Asegúrate que la ruta sea correcta
-import { db } from '@/lib/firebase-admin'; // Importamos db desde el módulo firebase-admin.ts corregido
+import { logRigbotMessage } from "@/lib/rigbotLog"; 
+import { DEFAULT_SYSTEM_PROMPT_TEMPLATE } from '@/lib/defaultSystemPromptTemplate';
+import { db } from '@/lib/firebase-admin'; // db se inicializa en firebase-admin.ts
 
-// --- IMPORTACIÓN CORREGIDA PARA FIRESTORE ---
-import { doc as getFirestoreDoc, getDoc as getFirestoreDocSnapshot } from 'firebase-admin/firestore'; 
-// Renombré para evitar cualquier posible colisión de nombres, aunque 'doc' y 'getDoc' también funcionarían
-// si no tienes otras variables con esos nombres en este alcance.
-// --- FIN IMPORTACIÓN CORREGIDA ---
+// ***** IMPORTACIÓN CLAVE PARA FIRESTORE FUNCTIONS *****
+import { doc, getDoc } from 'firebase-admin/firestore'; 
+// Ya no usamos los alias getFirestoreDoc y getFirestoreDocSnapshot para simplificar
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -42,9 +40,9 @@ async function getClientConfig(clientId) {
     return null;
   }
   try {
-    // Usamos los nombres importados y renombrados
-    const clientDocRef = getFirestoreDoc(db, 'clients', clientId); 
-    const clientDocSnap = await getFirestoreDocSnapshot(clientDocRef); 
+    // Usamos 'doc' y 'getDoc' importados directamente
+    const clientDocRef = doc(db, 'clients', clientId); 
+    const clientDocSnap = await getDoc(clientDocRef); 
 
     if (clientDocSnap.exists()) {
       console.log(`getClientConfig: Configuración encontrada para clientId: ${clientId}`);
@@ -74,7 +72,6 @@ function getDayIdentifier(dateObj, timeZone) {
 }
 
 export default async function handler(req, res) {
-  // --- INICIO Manejo de CORS Mejorado ---
   const allowedOriginsString = process.env.ALLOWED_ORIGINS || "https://rigsite-web.vercel.app"; 
   const allowedOrigins = allowedOriginsString.split(',').map(origin => origin.trim());
   const requestOrigin = req.headers.origin;
@@ -108,7 +105,6 @@ export default async function handler(req, res) {
         return res.status(403).json({ error: "Origen no permitido por CORS."}); 
     }
   }
-  // --- FIN Manejo de CORS Mejorado ---
 
   const { message, sessionId: providedSessionId, clientId: bodyClientId } = req.body || {};
   const requestClientId = bodyClientId || req.headers['x-client-id'] || "demo-client";
@@ -518,7 +514,7 @@ export default async function handler(req, res) {
     console.log(`System Prompt para OpenAI (clientId: ${requestClientId}, primeros 500 chars):`, finalSystemPrompt.substring(0, 500) + "...");
 
     const chatResponse = await openai.chat.completions.create({
-      model: MODEL_FALLBACK, // Podrías hacerlo configurable: effectiveConfig.openaiModel
+      model: MODEL_FALLBACK,
       messages: [
         { role: 'system', content: finalSystemPrompt },
         { role: 'user', content: message }
