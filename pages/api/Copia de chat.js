@@ -1,17 +1,59 @@
-// pages/api/chat.js
-
+// rigbot-product/pages/api/chat.js
 import { getCalendarClient } from '@/lib/google';
 import OpenAI from 'openai';
+import { logRigbotMessage } from "@/lib/rigbotLog"; 
+import { DEFAULT_SYSTEM_PROMPT_TEMPLATE } from '@/lib/defaultSystemPromptTemplate';
+import { db } from '@/lib/firebase-admin'; // db se inicializa en firebase-admin.ts
+
+// YA NO NECESITAMOS IMPORTAR 'doc' y 'getDoc' aquí porque usaremos los métodos de la instancia 'db'
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
-const CHILE_UTC_OFFSET_HOURS = -4; 
-const MAX_SUGGESTIONS = 5; 
-const DAYS_TO_QUERY_CALENDAR = 7; 
-const MAX_DAYS_FOR_USER_REQUEST = 21; 
+const MODEL_FALLBACK = process.env.OPENAI_MODEL || 'gpt-4o';
+const CHILE_UTC_OFFSET_HOURS = -4;
+const WHATSAPP_FALLBACK_PLACEHOLDER = "+56900000000";
+
+const defaultConfig = {
+  basePrompt: process.env.RIGBOT_PROMPT || DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+  calendarQueryDays: 7,
+  calendarMaxUserRequestDays: 21,
+  maxSuggestions: 5,
+  whatsappNumber: process.env.RIGBOT_DEFAULT_WSP || WHATSAPP_FALLBACK_PLACEHOLDER,
+  pricingInfo: "Nuestros precios son competitivos. Por favor, consulta al contactarnos.",
+  direccion: "Nuestra consulta está en Copiapó. Te daremos los detalles exactos al agendar.",
+  horario: "Atendemos de Lunes a Viernes, de 10:00 a 19:30.",
+  chiropracticVideoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  telefono: ""
+};
+
+async function getClientConfig(clientId) {
+  if (!clientId) {
+    console.log("getClientConfig: No clientId provided, returning null.");
+    return null;
+  }
+  if (!db || typeof db.collection !== 'function') { 
+    console.error("getClientConfig: Firestore db no está disponible desde firebase-admin.ts. No se puede obtener configuración.");
+    return null;
+  }
+  try {
+    // ***** CORRECCIÓN DE RIGO APLICADA *****
+    const clientDocRef = db.collection('clients').doc(clientId); 
+    const clientDocSnap = await clientDocRef.get(); 
+
+    if (clientDocSnap.exists) { // Es .exists, no .exists() para Admin SDK snapshot
+      console.log(`getClientConfig: Configuración encontrada para clientId: ${clientId}`);
+      return clientDocSnap.data();
+    } else {
+      console.log(`getClientConfig: No se encontró configuración para clientId: ${clientId}. Usando defaults.`);
+      return null;
+    }
+  } catch (err) {
+    console.error(`Error al obtener configuración para clientId ${clientId} desde Firestore:`, err);
+    return null;
+  }
+}
 
 function convertChileTimeToUtc(baseDateUtcDay, chileHour, chileMinute) {
   let utcHour = chileHour - CHILE_UTC_OFFSET_HOURS;
@@ -28,434 +70,466 @@ function getDayIdentifier(dateObj, timeZone) {
 }
 
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  const allowedOriginsString = process.env.ALLOWED_ORIGINS || "https://rigsite-web.vercel.app"; 
+  const allowedOrigins = allowedOriginsString.split(',').map(origin => origin.trim());
+  const requestOrigin = req.headers.origin;
+  let corsOriginSet = false;
 
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido' });
+  if (requestOrigin) {
+    if (allowedOrigins.includes(requestOrigin)) {
+      res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+      corsOriginSet = true;
+    } else if (process.env.NODE_ENV === 'development' && requestOrigin.startsWith('http://localhost:')) {
+      res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+      corsOriginSet = true;
+      console.log("INFO CORS: Origen localhost de desarrollo permitido:", requestOrigin);
+    } else {
+      console.warn("WARN CORS: Origen no está en la lista de permitidos y no es localhost dev:", requestOrigin, "| Permitidos:", allowedOrigins.join(' '));
+    }
+  } else {
+    console.log("INFO CORS: No se detectó header 'origin'. Se asume same-origin o no-CORS (ej. Postman).");
+  }
+  
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS'); 
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Client-ID, Authorization'); 
+  res.setHeader('Access-Control-Allow-Credentials', 'true'); 
 
-  const { message } = req.body;
-  if (!message) return res.status(400).json({ error: 'Falta el mensaje del usuario' });
+  if (req.method === 'OPTIONS') {
+    console.log("INFO: Recibida solicitud OPTIONS para CORS preflight desde:", requestOrigin, "| CORS permitido para origin?:", corsOriginSet);
+    if (corsOriginSet) {
+        return res.status(204).end(); 
+    } else {
+        console.warn("WARN CORS: Solicitud OPTIONS de origen no permitido:", requestOrigin, "será bloqueada por el navegador si no es same-origin.");
+        return res.status(403).json({ error: "Origen no permitido por CORS."}); 
+    }
+  }
+
+  const { message, sessionId: providedSessionId, clientId: bodyClientId } = req.body || {};
+  const requestClientId = bodyClientId || req.headers['x-client-id'] || "demo-client";
+  console.log(`INFO: Request entrante ${req.method} para /api/chat con effective clientId: ${requestClientId}`);
+
+  const ipAddress = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null;
+  const currentSessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+  if (!db) { 
+      console.error("FATAL en chat.js: Instancia de Firestore (db) NO DISPONIBLE desde firebase-admin.ts. Firebase Admin SDK probablemente no se inicializó correctamente. Revisa GOOGLE_APPLICATION_CREDENTIALS en Vercel para rigbot-product.");
+      const errorResponsePayload = { error: 'Error interno crítico del servidor. Contacta al administrador.' };
+      return res.status(500).json(errorResponsePayload);
+  }
+
+  const clientConfigData = await getClientConfig(requestClientId); 
+  let effectiveConfig = { ...defaultConfig };
+
+  if (clientConfigData) {
+    console.log("INFO: Datos crudos desde Firestore:", JSON.stringify(clientConfigData, null, 2));
+    effectiveConfig.basePrompt = clientConfigData.basePrompt || defaultConfig.basePrompt;
+    effectiveConfig.whatsappNumber = clientConfigData.whatsappNumber || defaultConfig.whatsappNumber;
+    effectiveConfig.pricingInfo = clientConfigData.pricingInfo || defaultConfig.pricingInfo;
+    effectiveConfig.direccion = clientConfigData.direccion || defaultConfig.direccion;
+    effectiveConfig.horario = clientConfigData.horario || defaultConfig.horario;
+    effectiveConfig.chiropracticVideoUrl = clientConfigData.chiropracticVideoUrl || defaultConfig.chiropracticVideoUrl;
+    effectiveConfig.telefono = clientConfigData.telefono || defaultConfig.telefono;
+
+    const firestoreCalendarQueryDays = Number(clientConfigData.calendarQueryDays);
+    if (!isNaN(firestoreCalendarQueryDays) && firestoreCalendarQueryDays > 0) {
+        effectiveConfig.calendarQueryDays = firestoreCalendarQueryDays;
+    } else if (clientConfigData.calendarQueryDays !== undefined) {
+        console.warn(`WARN: calendarQueryDays ('${clientConfigData.calendarQueryDays}') desde Firestore para ${requestClientId} no es válido, usando default: ${defaultConfig.calendarQueryDays}`);
+    }
+    const firestoreCalendarMaxUserRequestDays = Number(clientConfigData.calendarMaxUserRequestDays);
+    if (!isNaN(firestoreCalendarMaxUserRequestDays) && firestoreCalendarMaxUserRequestDays > 0) {
+        effectiveConfig.calendarMaxUserRequestDays = firestoreCalendarMaxUserRequestDays;
+    } else if (clientConfigData.calendarMaxUserRequestDays !== undefined) {
+        console.warn(`WARN: calendarMaxUserRequestDays ('${clientConfigData.calendarMaxUserRequestDays}') desde Firestore para ${requestClientId} no es válido, usando default: ${defaultConfig.calendarMaxUserRequestDays}`);
+    }
+    const firestoreMaxSuggestions = Number(clientConfigData.maxSuggestions);
+    if (!isNaN(firestoreMaxSuggestions) && firestoreMaxSuggestions >= 0) {
+        effectiveConfig.maxSuggestions = firestoreMaxSuggestions;
+    } else if (clientConfigData.maxSuggestions !== undefined) {
+        console.warn(`WARN: maxSuggestions ('${clientConfigData.maxSuggestions}') desde Firestore para ${requestClientId} no es válido, usando default: ${defaultConfig.maxSuggestions}`);
+    }
+  } else {
+    console.log(`INFO: No se encontraron datos en Firestore para ${requestClientId}, usando configuración por defecto completa.`);
+  }
+
+  console.log("🧠 Configuración efectiva usada para clientId", requestClientId, ":", JSON.stringify(effectiveConfig, null, 2));
+
+  const getWhatsappContactMessage = (contactNumber) => {
+    if (contactNumber && contactNumber !== WHATSAPP_FALLBACK_PLACEHOLDER && contactNumber.trim() !== "") {
+      return ` Para más detalles o para agendar, conversemos por WhatsApp 👉 ${contactNumber}`;
+    }
+    return " Para más detalles o para agendar, por favor contáctanos a través de nuestros canales principales.";
+  };
+  const getWhatsappDerivationSuffix = (contactNumber) => {
+    if (contactNumber && contactNumber !== WHATSAPP_FALLBACK_PLACEHOLDER && contactNumber.trim() !== "") {
+      return ` ¡Escríbenos por WhatsApp al 👉 ${contactNumber}!`;
+    }
+    return " ¡Contáctanos para coordinar!";
+  };
+
+  if (req.method !== 'POST') {
+    const errorResponsePayload = { error: 'Método no permitido' };
+    if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error: ${errorResponsePayload.error}`, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
+    return res.status(405).json(errorResponsePayload);
+  }
+
+  if (!message) {
+    const errorResponsePayload = { error: 'Falta el mensaje del usuario' };
+    if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error: ${errorResponsePayload.error}`, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
+    return res.status(400).json(errorResponsePayload);
+  }
+
+  if (typeof logRigbotMessage === "function") { 
+    try {
+      await logRigbotMessage({ role: "user", content: message, sessionId: currentSessionId, ip: ipAddress });
+    } catch (logErr) {
+      console.error("Error al loguear mensaje de usuario en Firestore:", logErr);
+    }
+  }
 
   try {
-    console.log('📨 Mensaje recibido:', message);
+    console.log(`📨 Mensaje ("${message}") recibido para ${requestClientId}`);
     const lowerMessage = message.toLowerCase();
 
-    // ***** CALENDAR KEYWORDS ACTUALIZADAS *****
     const calendarKeywords = [
-      'hora', 'turno', 'disponibilidad', 'agenda', 'cuando', 'horario', 
-      'disponible', 'libre', 'atiendes', 'ver', 'revisar', 'chequear', 'consultar',
-      'lunes', 'martes', 'miercoles', 'miércoles', 'jueves', 'viernes', 'sabado', 'sábado', 'domingo',
-      'hoy', 'mañana', 
-      'tarde', 
-      'a las', 
-      'para el', 
-      'tienes algo', 
-      'hay espacio', 
-      'agendar', 'agendamiento',
-      'proxima semana', 'próxima semana', 'prixima semana', 'procsima semana', 'proxima semama', // Variaciones de "próxima semana"
-      'proximo', 'próximo', 'priximo', 'procsimo' // Variaciones de "próximo"
+      'hora', 'turno', 'disponibilidad', 'agenda', 'cuando', 'horario', 'disponible', 'libre', 'atiendes', 
+      'ver', 'revisar', 'chequear', 'consultar', 'lunes', 'martes', 'miercoles', 'miércoles', 'jueves', 
+      'viernes', 'sabado', 'sábado', 'domingo', 'hoy', 'mañana', 'tarde', 'a las', 'para el', 
+      'tienes algo', 'hay espacio', 'agendar', 'agendamiento', 'proxima semana', 'próxima semana', 
+      'prixima semana', 'procsima semana', 'proxima semama', 'proximo', 'próximo', 'priximo', 'procsimo'
     ];
     const isCalendarQuery = calendarKeywords.some(keyword => lowerMessage.includes(keyword));
-    // ***** FIN CALENDAR KEYWORDS ACTUALIZADAS *****
-
-    const scheduleFooterMessage = `\n\nRecuerda que puedo revisar horarios para los próximos ${DAYS_TO_QUERY_CALENDAR} días aproximadamente desde la fecha que me indiques. Para fechas más lejanas o cualquier otra duda, ¡escríbenos por WhatsApp al 👉 +56 9 8996 7350 y te ayudamos con más detalle! 😊`;
 
     if (isCalendarQuery) {
-      console.log('⏳ Detectada consulta de calendario');
-      const calendar = await getCalendarClient();
+      console.log('⏳ Detectada consulta de calendario para', requestClientId);
+      let calendar;
+      try {
+        calendar = await getCalendarClient();
+        if (!calendar || typeof calendar.events?.list !== 'function') {
+          console.error("DEBUG ERROR: getCalendarClient() no devolvió un cliente de calendario válido para", requestClientId);
+          throw new Error("Cliente de calendario no inicializado correctamente.");
+        }
+        console.log("DEBUG: Cliente de Google Calendar obtenido para", requestClientId);
+      } catch (clientError) {
+        console.error("❌ Error al obtener el cliente de Google Calendar para", requestClientId, ":", clientError);
+        const errorResponsePayload = { error: 'No se pudo conectar con el servicio de calendario.', details: clientError.message };
+        if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno: ${errorResponsePayload.error} Detalles: ${errorResponsePayload.details}`, sessionId: currentSessionId, ip: ipAddress });} catch(e){console.error("Log Error:",e)} }
+        return res.status(500).json(errorResponsePayload);
+      }
+      
       const serverNowUtc = new Date();
-
-      let targetDateForDisplay = null; 
+      let targetDateForDisplay = null;
+      let targetDateIdentifierForSlotFilter = null;
       let targetHourChile = null;
       let targetMinuteChile = 0;
       let timeOfDay = null;
+      let isGenericNextWeekSearch = false;
 
       const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
-      const currentMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1; 
+      const currentMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1;
       const currentDayOfMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { day: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
-      
       const todayChile0000UtcTimestamp = Date.UTC(currentYearChile, currentMonthChile, currentDayOfMonthChile, 0 - CHILE_UTC_OFFSET_HOURS, 0, 0, 0);
       const refDateForTargetCalc = new Date(todayChile0000UtcTimestamp);
       const actualCurrentDayOfWeekInChile = refDateForTargetCalc.getUTCDay();
-      
-      const isProximoQuery = lowerMessage.includes('proximo') || lowerMessage.includes('próximo') || lowerMessage.includes('priximo') || lowerMessage.includes('procsimo');
-      const isAnyNextWeekIndicator = lowerMessage.includes('proxima semana') || lowerMessage.includes('próxima semana') || lowerMessage.includes('prixima semana') || lowerMessage.includes('procsima semana') || lowerMessage.includes('proxima semama');
-
+            
+      const isProximoWordQuery = calendarKeywords.some(k => k.startsWith("proximo") && lowerMessage.includes(k));
+      const isAnyNextWeekIndicator = calendarKeywords.some(k => k.includes("semana") && lowerMessage.includes(k));
       let specificDayKeywordIndex = -1;
-      const dayKeywordsList = [ 
-        { keyword: 'domingo', index: 0 }, { keyword: 'lunes', index: 1 }, 
-        { keyword: 'martes', index: 2 }, { keyword: 'miercoles', index: 3 }, 
-        { keyword: 'miércoles', index: 3 }, { keyword: 'jueves', index: 4 }, 
+      const dayKeywordsList = [
+        { keyword: 'domingo', index: 0 }, { keyword: 'lunes', index: 1 }, { keyword: 'martes', index: 2 },
+        { keyword: 'miercoles', index: 3 }, { keyword: 'miércoles', index: 3 }, { keyword: 'jueves', index: 4 },
         { keyword: 'viernes', index: 5 }, { keyword: 'sabado', index: 6 }, { keyword: 'sábado', index: 6 }
       ];
-
-      for (const dayInfo of dayKeywordsList) {
-        if (lowerMessage.includes(dayInfo.keyword)) {
-          specificDayKeywordIndex = dayInfo.index;
-          break;
-        }
-      }
-      
-      // ***** LÓGICA DE FECHA OBJETIVO REFINADA *****
+      for (const dayInfo of dayKeywordsList) { if (lowerMessage.includes(dayInfo.keyword)) { specificDayKeywordIndex = dayInfo.index; break; } }
+          
       if (lowerMessage.includes('hoy')) {
         targetDateForDisplay = new Date(refDateForTargetCalc);
       } else if (lowerMessage.includes('mañana') && !lowerMessage.includes('pasado mañana')) {
         targetDateForDisplay = new Date(refDateForTargetCalc);
         targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + 1);
-      } else if (specificDayKeywordIndex !== -1) { // Si se mencionó un día de la semana
-        targetDateForDisplay = new Date(refDateForTargetCalc); // Partir de hoy (Chile 00:00 UTC equiv)
-        let daysToAdd = specificDayKeywordIndex - actualCurrentDayOfWeekInChile;
-
-        if (daysToAdd < 0) { 
-          daysToAdd += 7; 
-        }
-        
-        // Si se pide explícitamente "próxima semana" Y el día calculado aún está en esta semana (daysToAdd < 7),
-        // O si se pide "próximo [día de hoy]" (daysToAdd === 0 && isProximoQuery)
-        // entonces forzar el salto a la semana siguiente.
-        if ((isAnyNextWeekIndicator && daysToAdd < 7) || (daysToAdd === 0 && isProximoQuery)) {
-          daysToAdd += 7;
-        } else if (daysToAdd === 0 && !isProximoQuery && serverNowUtc.getUTCHours() >= (19 - CHILE_UTC_OFFSET_HOURS)) {
-          // Si es hoy, no se pidió "próximo", y ya es tarde para ese día, ir a la próxima semana.
-          daysToAdd += 7;
-        }
-        targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + daysToAdd);
-      } else if (isAnyNextWeekIndicator) { // "próxima semana" genérico, sin día específico
-          targetDateForDisplay = new Date(refDateForTargetCalc);
-          let daysUntilNextMonday = (1 - actualCurrentDayOfWeekInChile + 7) % 7;
-          if (daysUntilNextMonday === 0) daysUntilNextMonday = 7; 
-          targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + daysUntilNextMonday); 
+      } else if (specificDayKeywordIndex !== -1) {
+           targetDateForDisplay = new Date(refDateForTargetCalc);
+           let daysToAdd = specificDayKeywordIndex - actualCurrentDayOfWeekInChile;
+           if (daysToAdd < 0) { daysToAdd += 7; }
+           if ((isAnyNextWeekIndicator && daysToAdd < 7) || (daysToAdd === 0 && isProximoWordQuery)) {
+             if (!(daysToAdd >=7 && isAnyNextWeekIndicator)) { daysToAdd += 7; }
+           } else if (daysToAdd === 0 && !isProximoWordQuery && serverNowUtc.getUTCHours() >= (19 - CHILE_UTC_OFFSET_HOURS)) {
+             daysToAdd += 7;
+           }
+           targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + daysToAdd);
+      } else if (isAnyNextWeekIndicator) {
+           targetDateForDisplay = new Date(refDateForTargetCalc);
+           let daysUntilNextMonday = (1 - actualCurrentDayOfWeekInChile + 7) % 7;
+           if (daysUntilNextMonday === 0 && !isProximoWordQuery) daysUntilNextMonday = 7;
+           targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + daysUntilNextMonday);
+           isGenericNextWeekSearch = true;
       }
-      // Si targetDateForDisplay sigue null, la búsqueda será genérica desde hoy.
-      // ***** FIN LÓGICA DE FECHA OBJETIVO REFINADA *****
-
-
+          
       if (targetDateForDisplay) {
-        console.log(`🎯 Fecha Objetivo (para mostrar y filtrar): ${new Intl.DateTimeFormat('es-CL', { dateStyle: 'full', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} (UTC: ${targetDateForDisplay.toISOString()})`);
-        const futureLimitCheckDate = new Date(refDateForTargetCalc); // Comparamos desde el inicio del día de hoy en Chile
-        futureLimitCheckDate.setUTCDate(futureLimitCheckDate.getUTCDate() + MAX_DAYS_FOR_USER_REQUEST);
-
+        console.log(`🎯 Fecha Objetivo para ${requestClientId}: ${new Intl.DateTimeFormat('es-CL', { dateStyle: 'full', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} (UTC: ${targetDateForDisplay.toISOString()})`);
+        const futureLimitCheckDate = new Date(refDateForTargetCalc);
+        futureLimitCheckDate.setUTCDate(futureLimitCheckDate.getUTCDate() + effectiveConfig.calendarMaxUserRequestDays);
         if (targetDateForDisplay >= futureLimitCheckDate) {
-            const formattedDateAsked = new Intl.DateTimeFormat('es-CL', { dateStyle: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay);
-            let reply = `¡Entiendo que buscas para el ${formattedDateAsked}! 😊 Por ahora, mi calendario mental llega hasta unos ${MAX_DAYS_FOR_USER_REQUEST} días en el futuro (aprox. ${Math.floor(MAX_DAYS_FOR_USER_REQUEST / 7)} semanas).`;
-            console.log('✅ Respuesta generada (fecha demasiado lejana):', reply);
-            // No retornamos aquí, dejamos que la búsqueda proceda y si no encuentra nada, el footer se añade abajo.
-            // O mejor, sí retornamos para ser explícitos.
-            return res.status(200).json({ response: reply + scheduleFooterMessage });
+          const formattedDateAsked = new Intl.DateTimeFormat('es-CL', { dateStyle: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay);
+          let reply = `¡Entiendo que buscas para el ${formattedDateAsked}! 😊 Por ahora, mi calendario mental solo llega hasta unos ${effectiveConfig.calendarMaxUserRequestDays} días en el futuro.${getWhatsappContactMessage(effectiveConfig.whatsappNumber)} y mis colegas humanos te ayudarán con gusto.`;
+          if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: reply, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
+          return res.status(200).json({ response: reply });
         }
       }
-      
-      const targetDateIdentifierForSlotFilter = targetDateForDisplay ? getDayIdentifier(targetDateForDisplay, 'America/Santiago') : null;
-      // ... (El resto del código se mantiene igual que en la respuesta #44, que generó los logs correctos para Jueves y Viernes)
-      // ... Copia desde aquí (línea de "if(targetDateIdentifierForSlotFilter) console.log(...)")
-      // ... hasta el final del bloque "if (isCalendarQuery)" de la respuesta #44.
-      // ... La parte de OpenAI y el catch final también se mantienen.
-      // INICIO DE LA LÓGICA QUE SE MANTIENE (DE RESPUESTA #44)
-      if(targetDateIdentifierForSlotFilter) console.log(`🏷️ Identificador de Fecha para Filtro de Slots (Chile YAML-MM-DD): ${targetDateIdentifierForSlotFilter}`);
-      
+          
+      targetDateIdentifierForSlotFilter = (targetDateForDisplay && !isGenericNextWeekSearch) ? getDayIdentifier(targetDateForDisplay, 'America/Santiago') : null;
+      if(targetDateIdentifierForSlotFilter) { console.log(`🏷️ Identificador de Fecha para Filtro (Chile YAML-MM-DD) para ${requestClientId}: ${targetDateIdentifierForSlotFilter}`); }
+      else if (targetDateForDisplay && isGenericNextWeekSearch) { console.log(`🏷️ Búsqueda genérica para la semana que comienza el ${getDayIdentifier(targetDateForDisplay, 'America/Santiago')} para ${requestClientId}, sin filtro de día específico.`); }
+      else { console.log(`🏷️ Búsqueda genérica desde hoy para ${requestClientId}, sin filtro de día específico.`); }
+          
       const timeMatch = lowerMessage.match(/(\d{1,2})\s*(:(00|30|15|45))?\s*(pm|am|h|hr|hrs)?/i);
       if (timeMatch) {
         let hour = parseInt(timeMatch[1], 10);
-        targetMinuteChile = timeMatch[3] ? parseInt(timeMatch[3], 10) : 0; 
+        targetMinuteChile = timeMatch[3] ? parseInt(timeMatch[3], 10) : 0;
         const isPm = timeMatch[4] && timeMatch[4].toLowerCase() === 'pm';
         const isAm = timeMatch[4] && timeMatch[4].toLowerCase() === 'am';
         if (isPm && hour >= 1 && hour <= 11) hour += 12;
-        if (isAm && hour === 12) hour = 0; 
+        if (isAm && hour === 12) hour = 0;
         targetHourChile = hour;
-        if (targetMinuteChile > 0 && targetMinuteChile < 30) targetMinuteChile = 0;
-        else if (targetMinuteChile > 30 && targetMinuteChile < 60) targetMinuteChile = 30;
-        console.log(`⏰ Hora objetivo (Chile): ${targetHourChile}:${targetMinuteChile.toString().padStart(2,'0')}`);
+        if (targetMinuteChile > 0 && targetMinuteChile < 15) targetMinuteChile = 0;
+        else if (targetMinuteChile > 15 && targetMinuteChile < 30) targetMinuteChile = 15;
+        else if (targetMinuteChile > 30 && targetMinuteChile < 45) targetMinuteChile = 30;
+        else if (targetMinuteChile > 45 && targetMinuteChile < 60) targetMinuteChile = 45;
+        console.log(`⏰ Hora objetivo (Chile) para ${requestClientId}: ${targetHourChile}:${targetMinuteChile.toString().padStart(2,'0')}`);
       }
-      if (!targetHourChile && !isAnyNextWeekIndicator && !isProximoQuery && !(targetDateForDisplay && targetDateForDisplay > refDateForTargetCalc) ) { 
+
+      if (!targetHourChile && !isAnyNextWeekIndicator && !isProximoWordQuery && !(targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') !== getDayIdentifier(refDateForTargetCalc, 'America/Santiago'))) {
         if ((lowerMessage.includes('mañana') && !lowerMessage.includes('pasado mañana'))) {
-             if (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === getDayIdentifier(new Date(refDateForTargetCalc.getTime() + 24*60*60*1000), 'America/Santiago')) {
+            if (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === getDayIdentifier(new Date(refDateForTargetCalc.getTime() + 24*60*60*1000), 'America/Santiago')) {
                 timeOfDay = 'morning';
-             }
+            }
         } else if (lowerMessage.includes('tarde')) {
             timeOfDay = 'afternoon';
         }
-        if(timeOfDay) console.log(`🕒 Franja horaria: ${timeOfDay}`);
+         if(timeOfDay) console.log(`🕒 Franja horaria solicitada para ${requestClientId}: ${timeOfDay}`);
       }
-      
+          
       const WORKING_HOURS_CHILE_NUMERIC = [10, 10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14, 14.5, 15, 15.5, 16, 16.5, 17, 17.5, 18, 18.5, 19, 19.5];
       if (targetHourChile !== null) {
         const requestedTimeNumeric = targetHourChile + (targetMinuteChile / 60);
         if (!WORKING_HOURS_CHILE_NUMERIC.includes(requestedTimeNumeric) || requestedTimeNumeric < 10 || requestedTimeNumeric > 19.5) {
-            let reply = `¡Ojo! 👀 Parece que las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
-            if (targetDateForDisplay) { 
-                reply = `¡Ojo! 👀 Parece que el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
-            }
-            reply += ` está fuera de nuestro horario de atención (que es de 10:00 a 19:30). ¿Te gustaría buscar dentro de ese rango?`;
-            console.log('✅ Respuesta generada (fuera de horario):', reply);
-            return res.status(200).json({ response: reply + scheduleFooterMessage });
+          let replyPreamble = `¡Ojo! 👀 Parece que las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
+          if (targetDateForDisplay) {
+            replyPreamble = `¡Ojo! 👀 Parece que el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
+          }
+          let reply = `${replyPreamble} está fuera de nuestro horario de atención (${effectiveConfig.horario}). ¿Te gustaría buscar dentro de ese rango?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)}`;
+          if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: reply, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
+          return res.status(200).json({ response: reply });
         }
       }
 
-      let calendarQueryStartUtc;
-      if (targetDateForDisplay) { 
-          calendarQueryStartUtc = new Date(targetDateForDisplay.getTime());
-      } else { 
-          calendarQueryStartUtc = new Date(refDateForTargetCalc.getTime()); 
-      }
-      
+      let calendarQueryStartUtc = targetDateForDisplay ? new Date(targetDateForDisplay.getTime()) : new Date(refDateForTargetCalc.getTime());
       const calendarQueryEndUtc = new Date(calendarQueryStartUtc);
-      calendarQueryEndUtc.setUTCDate(calendarQueryStartUtc.getUTCDate() + DAYS_TO_QUERY_CALENDAR); 
+      calendarQueryEndUtc.setUTCDate(calendarQueryStartUtc.getUTCDate() + effectiveConfig.calendarQueryDays);
       
-      console.log(`🗓️ Google Calendar Query: De ${calendarQueryStartUtc.toISOString()} a ${calendarQueryEndUtc.toISOString()}`);
-
-      const googleResponse = await calendar.events.list({
-        calendarId: 'primary',
-        timeMin: calendarQueryStartUtc.toISOString(),
-        timeMax: calendarQueryEndUtc.toISOString(),
-        singleEvents: true,
-        orderBy: 'startTime'
-      });
-
-      const busySlots = googleResponse.data.items
-        .filter(e => e.status !== 'cancelled')
-        .map(e => {
-          if (e.start?.dateTime && e.end?.dateTime) {
-            return { start: new Date(e.start.dateTime).getTime(), end: new Date(e.end.dateTime).getTime() };
-          } else if (e.start?.date && e.end?.date) {
-            const startDateAllDayUtc = new Date(e.start.date);
-            const endDateAllDayUtc = new Date(e.end.date);
-            return { start: startDateAllDayUtc.getTime(), end: endDateAllDayUtc.getTime() };
-          }
-          return null;
-        }).filter(Boolean);
-      console.log(`Found ${busySlots.length} busy slots from Google Calendar.`);
-      if (busySlots.length > 0) {
-        console.log("DEBUG: Contenido de busySlots (eventos UTC de Google Calendar):");
-        busySlots.forEach((bs, index) => {
-          const eventStartDate = new Date(bs.start);
-          const eventEndDate = new Date(bs.end);
-          if (eventEndDate > calendarQueryStartUtc && eventStartDate < calendarQueryEndUtc) {
-            console.log(`  BusySlot ${index}: Start: ${eventStartDate.toISOString()}, End: ${eventEndDate.toISOString()}`);
-          }
+      console.log(`🗓️ Google Calendar Query para ${requestClientId}: De ${calendarQueryStartUtc.toISOString()} a ${calendarQueryEndUtc.toISOString()}`);
+      let googleResponse;
+      try {
+        console.log("DEBUG: Intentando llamar a calendar.events.list para", requestClientId);
+        googleResponse = await calendar.events.list({
+          calendarId: 'primary',
+          timeMin: calendarQueryStartUtc.toISOString(),
+          timeMax: calendarQueryEndUtc.toISOString(),
+          singleEvents: true,
+          orderBy: 'startTime'
         });
+        console.log("DEBUG: Llamada a calendar.events.list completada para", requestClientId);
+      } catch (googleError) {
+        console.error(`❌ ERROR DIRECTO en calendar.events.list para ${requestClientId}:`, googleError);
+        const errorResponsePayload = { error: 'Error al consultar el calendario de Google.', details: googleError.message };
+        if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno: ${errorResponsePayload.error} Detalles: ${errorResponsePayload.details}`, sessionId: currentSessionId, ip: ipAddress });} catch(e){console.error("Log Error:",e)} }
+        return res.status(500).json(errorResponsePayload);
+      }
+          
+      const eventsFromGoogle = googleResponse?.data?.items || [];
+      const busySlots = eventsFromGoogle.filter(e => e.status !== 'cancelled')
+        .map(e => {
+            if (e.start?.dateTime && e.end?.dateTime) {
+              return { start: new Date(e.start.dateTime).getTime(), end: new Date(e.end.dateTime).getTime() };
+            } else if (e.start?.date && e.end?.date) {
+              const startDateAllDayUtc = new Date(e.start.date);
+              const endDateAllDayUtc = new Date(e.end.date);
+              return { start: startDateAllDayUtc.getTime(), end: endDateAllDayUtc.getTime() };
+            }
+            return null;
+        }).filter(Boolean);
+      console.log(`Found ${busySlots.length} busy slots from Google Calendar for ${requestClientId}.`);
+      if (busySlots.length > 0) {
+          console.log(`DEBUG: Contenido de busySlots (eventos UTC de Google Calendar) para ${requestClientId}:`);
+          busySlots.forEach((bs, index) => {
+            const eventStartDate = new Date(bs.start);
+            const eventEndDate = new Date(bs.end);
+            if (eventEndDate > calendarQueryStartUtc && eventStartDate < calendarQueryEndUtc) {
+              console.log(`  BusySlot ${index}: Start: ${eventStartDate.toISOString()}, End: ${eventEndDate.toISOString()}`);
+            }
+          });
       }
 
-      const WORKING_HOURS_CHILE_STR = [
-        '10:00', '10:30', '11:00', '11:30', '12:00', '12:30', '13:00', '13:30',
-        '14:00', '14:30', '15:00', '15:30', '16:00', '16:30', '17:00', '17:30',
-        '18:00', '18:30', '19:00', '19:30'
-      ];
+      const WORKING_HOURS_CHILE_STR = ['10:00', '10:30', '11:00', '11:30', '12:00', '12:30', '13:00', '13:30', '14:00', '14:30', '15:00', '15:30', '16:00', '16:30', '17:00', '17:30', '18:00', '18:30', '19:00', '19:30'];
       const availableSlotsOutput = [];
-      const processedDaysForGenericQuery = new Set(); 
-      
-      let baseIterationDateDayUtcStart;
-      if (targetDateForDisplay) {
-          baseIterationDateDayUtcStart = new Date(targetDateForDisplay);
-      } else { 
-          baseIterationDateDayUtcStart = new Date(refDateForTargetCalc);
-      }
+      const processedDaysForGenericQuery = new Set();
+      let baseIterationDateDayUtcStart = targetDateForDisplay ? new Date(targetDateForDisplay) : new Date(refDateForTargetCalc);
 
-      for (let i = 0; i < DAYS_TO_QUERY_CALENDAR; i++) { 
+      console.log(`DEBUG: Iniciando bucle de ${effectiveConfig.calendarQueryDays} días para ${requestClientId}. Base UTC para iteración: ${baseIterationDateDayUtcStart.toISOString()}`);
+      for (let i = 0; i < effectiveConfig.calendarQueryDays; i++) {
         const currentDayProcessingUtcStart = new Date(baseIterationDateDayUtcStart);
         currentDayProcessingUtcStart.setUTCDate(baseIterationDateDayUtcStart.getUTCDate() + i);
-        
         for (const timeChileStr of WORKING_HOURS_CHILE_STR) {
-          const [hChile, mChile] = timeChileStr.split(':').map(Number);
-
-          if (targetHourChile !== null) {
-            if (hChile !== targetHourChile || mChile !== targetMinuteChile) continue;
-          } else if (timeOfDay && !(isAnyNextWeekIndicator && !targetDateIdentifierForSlotFilter && !isProximoQuery) ) { 
-            if (timeOfDay === 'morning' && (hChile < 10 || hChile >= 14)) continue;
-            if (timeOfDay === 'afternoon' && (hChile < 14 || hChile > 19 || (hChile === 19 && mChile > 30))) continue;
-          }
-
-          const slotStartUtc = convertChileTimeToUtc(currentDayProcessingUtcStart, hChile, mChile);
-          if (isNaN(slotStartUtc.getTime())) { console.error("Slot UTC inválido:", currentDayProcessingUtcStart, hChile, mChile); continue; }
-          
-          const slightlyFutureServerNowUtc = new Date(serverNowUtc.getTime() + 5 * 60 * 1000);
-          if (slotStartUtc < slightlyFutureServerNowUtc) continue;
-
-          const slotDayIdentifierInChile = getDayIdentifier(slotStartUtc, 'America/Santiago');
-
-          if (targetDateIdentifierForSlotFilter) {
-            if (slotDayIdentifierInChile !== targetDateIdentifierForSlotFilter) {
-              continue; 
+            const [hChile, mChile] = timeChileStr.split(':').map(Number);
+            if (targetHourChile !== null) {
+              if (hChile !== targetHourChile || mChile !== targetMinuteChile) { continue; }
+            } else if (timeOfDay && !isGenericNextWeekSearch && !(isAnyNextWeekIndicator && !targetDateIdentifierForSlotFilter && !isProximoWordQuery) ) {
+              if (timeOfDay === 'morning' && (hChile < 10 || hChile >= 14)) continue;
+              if (timeOfDay === 'afternoon' && (hChile < 14 || hChile > 19 || (hChile === 19 && mChile > 30))) continue;
             }
-          }
-
-          const slotEndUtc = new Date(slotStartUtc);
-          slotEndUtc.setUTCMinutes(slotEndUtc.getUTCMinutes() + 30);
-          const isBusy = busySlots.some(busy => slotStartUtc.getTime() < busy.end && slotEndUtc.getTime() > busy.start);
-          
-          if (!isBusy) { 
-            const formattedSlot = new Intl.DateTimeFormat('es-CL', {
-                weekday: 'long', day: 'numeric', month: 'long',
-                hour: '2-digit', minute: '2-digit', timeZone: 'America/Santiago'
-            }).format(slotStartUtc);
-            
-            if (!targetDateIdentifierForSlotFilter && !targetHourChile) { 
-                if (availableSlotsOutput.length < 10) { 
+            const slotStartUtc = convertChileTimeToUtc(currentDayProcessingUtcStart, hChile, mChile);
+            if (isNaN(slotStartUtc.getTime())) { console.warn("SlotStartUtc inválido:", currentDayProcessingUtcStart, hChile, mChile); continue; }
+            const slightlyFutureServerNowUtc = new Date(serverNowUtc.getTime() + 1 * 60 * 1000);
+            if (slotStartUtc < slightlyFutureServerNowUtc) { continue; }
+            const slotDayIdentifierInChile = getDayIdentifier(slotStartUtc, 'America/Santiago');
+            if (targetDateIdentifierForSlotFilter) {
+              if (slotDayIdentifierInChile !== targetDateIdentifierForSlotFilter) { continue; }
+            }
+            const slotEndUtc = new Date(slotStartUtc);
+            slotEndUtc.setUTCMinutes(slotEndUtc.getUTCMinutes() + 30);
+            const isBusy = busySlots.some(busy => slotStartUtc.getTime() < busy.end && slotEndUtc.getTime() > busy.start);
+            if (!isBusy) {
+              const formattedSlot = new Intl.DateTimeFormat('es-CL', {weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'America/Santiago'}).format(slotStartUtc);
+              if (!targetDateIdentifierForSlotFilter && !targetHourChile) {
+                  if (availableSlotsOutput.length < 10) {
                     if (!processedDaysForGenericQuery.has(slotDayIdentifierInChile) || availableSlotsOutput.length < 2) {
-                         availableSlotsOutput.push(formattedSlot);
-                         processedDaysForGenericQuery.add(slotDayIdentifierInChile);
+                        availableSlotsOutput.push(formattedSlot); processedDaysForGenericQuery.add(slotDayIdentifierInChile);
                     } else if (Array.from(processedDaysForGenericQuery).length < 3 && availableSlotsOutput.filter(s => s.startsWith(new Intl.DateTimeFormat('es-CL', {weekday: 'long', timeZone: 'America/Santiago'}).format(slotStartUtc))).length < 2) {
-                         availableSlotsOutput.push(formattedSlot);
+                        availableSlotsOutput.push(formattedSlot);
                     }
-                }
-            } else { 
-                 availableSlotsOutput.push(formattedSlot);
+                  }
+              } else {
+                availableSlotsOutput.push(formattedSlot);
+              }
             }
-          }
         }
         if (targetDateIdentifierForSlotFilter && getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago') === targetDateIdentifierForSlotFilter) {
-            if (targetHourChile !== null || availableSlotsOutput.length >= MAX_SUGGESTIONS ) break; 
+            if (targetHourChile !== null || availableSlotsOutput.length >= effectiveConfig.maxSuggestions ) break;
         }
-        if (availableSlotsOutput.length >= MAX_SUGGESTIONS && !targetDateIdentifierForSlotFilter && !targetHourChile && processedDaysForGenericQuery.size >=2) break; 
+        if (availableSlotsOutput.length >= effectiveConfig.maxSuggestions && !targetDateIdentifierForSlotFilter && !targetHourChile && processedDaysForGenericQuery.size >=2) break;
       }
-      
-      if(targetDateIdentifierForSlotFilter) {
-          console.log(`🔎 Slots encontrados para el día de Chile ${targetDateIdentifierForSlotFilter}: ${availableSlotsOutput.length}`);
-      } else {
-          console.log(`🔎 Slots encontrados en búsqueda general (próximos ${DAYS_TO_QUERY_CALENDAR} días): ${availableSlotsOutput.length}`);
-      }
-      
-      let reply = '';
-
-      if (targetHourChile !== null) { 
+          
+      if(targetDateIdentifierForSlotFilter) { console.log(`🔎 Slots encontrados para el día de Chile ${targetDateIdentifierForSlotFilter} para ${requestClientId}: ${availableSlotsOutput.length}`); }
+      else { console.log(`🔎 Slots encontrados en búsqueda genérica (próximos ${effectiveConfig.calendarQueryDays} días) para ${requestClientId}: ${availableSlotsOutput.length}`); }
+          
+      let replyCalendar = '';
+      if (targetHourChile !== null) {
         if (availableSlotsOutput.length > 0) {
-          reply = `¡Excelente! 🎉 Justo el ${availableSlotsOutput[0]} está libre para ti. ¡Qué buena suerte! Para asegurar tu cita, contáctanos directamente y la reservamos. 😉`;
+          replyCalendar = `¡Excelente! 🎉 Justo el ${availableSlotsOutput[0]} está libre para ti. ¡Qué buena suerte! Para asegurar tu cita,${getWhatsappDerivationSuffix(effectiveConfig.whatsappNumber)} 😉`;
         } else {
           let specificTimeQuery = "";
           if(targetDateForDisplay) specificTimeQuery += `${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} `;
           specificTimeQuery += `a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
-          reply = `¡Uy! Justo ${specificTimeQuery} no me quedan espacios. 😕 ¿Te gustaría que revise otro horario o quizás otro día?`;
+          replyCalendar = `¡Uy! Justo ${specificTimeQuery} no me quedan espacios. 😕 ¿Te gustaría que revise otro horario o quizás otro día?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)}`;
         }
-      } else if (availableSlotsOutput.length > 0) { 
+      } else if (availableSlotsOutput.length > 0) {
         let intro = `¡Buenas noticias! 🎉 Encontré estas horitas disponibles`;
         if (targetDateForDisplay) {
+          if (isGenericNextWeekSearch) {
+            intro += ` para la próxima semana (comenzando el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)})`;
+          } else {
             intro += ` para el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)}`;
-        } else if (isAnyNextWeekIndicator) { 
-            intro += ` para la próxima semana`;
-        } else { 
-             intro += ` en los próximos días`;
+          }
+        } else {
+          intro += ` en los próximos días`;
         }
         if (timeOfDay === 'morning') intro += ' por la mañana';
         if (timeOfDay === 'afternoon') intro += ' por la tarde';
         intro += '. ¡A ver si alguna te acomoda! 🥳:';
-
+        
         let finalSuggestions = [];
-        if (!targetDateIdentifierForSlotFilter && !targetHourChile) { 
+        if (!targetDateIdentifierForSlotFilter && !targetHourChile) {
             const slotsByDay = {};
             for (const slot of availableSlotsOutput) {
-                const dayName = slot.split(',')[0]; 
-                if (!slotsByDay[dayName]) slotsByDay[dayName] = [];
-                if (slotsByDay[dayName].length < 2) { 
-                    slotsByDay[dayName].push(slot);
+                const dayPart = slot.split(',')[0] + ', ' + slot.split(',')[1];
+                if (!slotsByDay[dayPart]) slotsByDay[dayPart] = [];
+                if (slotsByDay[dayPart].length < 2) {
+                    slotsByDay[dayPart].push(slot);
                 }
             }
             let count = 0;
-            for (const day in slotsByDay) { 
+            for (const day in slotsByDay) {
+                if (count >= effectiveConfig.maxSuggestions) break;
                 for(const slot of slotsByDay[day]){
-                    if(count < MAX_SUGGESTIONS){
-                        finalSuggestions.push(slot);
-                        count++;
-                    } else { break; }
+                    if (count >= effectiveConfig.maxSuggestions) break;
+                    finalSuggestions.push(slot);
+                    count++;
                 }
-                if (count >= MAX_SUGGESTIONS) break; 
             }
         } else { 
-            finalSuggestions = availableSlotsOutput.slice(0, MAX_SUGGESTIONS);
+            finalSuggestions = availableSlotsOutput.slice(0, effectiveConfig.maxSuggestions); 
         }
 
-        reply = `${intro}\n- ${finalSuggestions.join('\n- ')}`;
-        
-        if (availableSlotsOutput.length > finalSuggestions.length && finalSuggestions.length > 0) { 
-           const remaining = availableSlotsOutput.length - finalSuggestions.length;
-           if (remaining > 0) {
-             reply += `\n\n(Y ${remaining} más... ¡para que tengas de dónde elegir! 😉)`;
-           }
+        replyCalendar = `${intro}\n- ${finalSuggestions.join('\n- ')}`;
+        if (availableSlotsOutput.length > finalSuggestions.length && finalSuggestions.length > 0) {
+          const remaining = availableSlotsOutput.length - finalSuggestions.length;
+          if (remaining > 0) { replyCalendar += `\n\n(Y ${remaining} más... ¡para que tengas de dónde elegir! 😉)`; }
         }
-      } else { 
-        reply = '¡Pucha! 😔 Parece que no tengo horas libres';
+        replyCalendar += `\n\nPara reservar alguna o si buscas otra opción,${getWhatsappDerivationSuffix(effectiveConfig.whatsappNumber)}`;
+      } else {
+        replyCalendar = '¡Pucha! 😔 Parece que no tengo horas libres';
         if (targetDateForDisplay) {
-            reply += ` para el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)}`;
-        } else if (isAnyNextWeekIndicator) {
-            reply += ` para la próxima semana`;
-        }
-        if (timeOfDay === 'morning') reply += ' por la mañana';
-        if (timeOfDay === 'afternoon') reply += ' por la tarde';
-        if (targetHourChile !== null && !targetDateForDisplay && !isAnyNextWeekIndicator) reply += ` a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`
-        
-        if (targetDateForDisplay || timeOfDay || targetHourChile || isAnyNextWeekIndicator) {
-             reply += '.';
-        } else { 
-            reply += ` dentro de los próximos ${DAYS_TO_QUERY_CALENDAR} días.`;
-        }
-        reply += ' ¿Te animas a que busquemos en otra fecha u horario? ¡Seguro encontramos algo! 👍';
+          replyCalendar += ` para el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)}`;
+        } else if (isAnyNextWeekIndicator) { replyCalendar += ` para la próxima semana`; }
+        if (timeOfDay === 'morning') replyCalendar += ' por la mañana'; if (timeOfDay === 'afternoon') replyCalendar += ' por la tarde';
+        if (targetHourChile !== null && !targetDateForDisplay && !isAnyNextWeekIndicator) replyCalendar += ` a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`
+        if (targetDateForDisplay || timeOfDay || targetHourChile || isAnyNextWeekIndicator) { replyCalendar += '.'; }
+        else { replyCalendar += ` dentro de los próximos ${effectiveConfig.calendarQueryDays} días.`; }
+        replyCalendar += ` ¿Te animas a que busquemos en otra fecha u horario?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)} ¡Seguro te podemos ayudar!`;
       }
-      
-      reply += scheduleFooterMessage; 
 
-      console.log('✅ Respuesta generada:', reply);
-      return res.status(200).json({ response: reply });
-      // FIN DE LA LÓGICA DE CALENDARIO
-    } 
+      console.log('✅ Respuesta generada (Calendario):', replyCalendar);
+      if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: replyCalendar, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
+      return res.status(200).json({ response: replyCalendar });
+    }
 
-    // --- Si no es consulta de calendario, usar OpenAI ---
-    console.log('💡 Consulta normal, usando OpenAI');
-    const systemPrompt = process.env.RIGBOT_PROMPT || 
-`Eres Rigbot, el asistente virtual de la consulta quiropráctica Rigquiropráctico, atendido por el quiropráctico Roberto Ibacache en Copiapó, Chile.
-Tu rol es entregar información clara, profesional, cálida y empática a quienes consultan por servicios quiroprácticos, y sugerir horarios disponibles usando el calendario conectado.
+    // --- Rama de OpenAI ---
+    console.log('💡 Consulta normal, usando OpenAI para', requestClientId);
+    
+    let finalSystemPrompt = effectiveConfig.basePrompt;
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{DAYS_TO_QUERY_CALENDAR\}/g, effectiveConfig.calendarQueryDays.toString());
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{MAX_DAYS_FOR_USER_REQUEST\}/g, effectiveConfig.calendarMaxUserRequestDays.toString());
+    if (effectiveConfig.whatsappNumber && effectiveConfig.whatsappNumber !== WHATSAPP_FALLBACK_PLACEHOLDER && effectiveConfig.whatsappNumber.trim() !== "") {
+        finalSystemPrompt = finalSystemPrompt.replace(/\$\{whatsappNumber\}/g, effectiveConfig.whatsappNumber);
+    } else {
+        finalSystemPrompt = finalSystemPrompt.replace(/\$\{whatsappNumber\}/g, "nuestro principal canal de contacto telefónico o digital");
+    }
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{pricingInfo\}/g, effectiveConfig.pricingInfo);
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{direccion\}/g, effectiveConfig.direccion);
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{horario\}/g, effectiveConfig.horario);
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{chiropracticVideoUrl\}/g, effectiveConfig.chiropracticVideoUrl);
 
-No agendas directamente, no recopilas datos personales ni confirmas pagos.
-Nunca inventes información. Solo responde con lo que indican estas instrucciones.
-Siempre invita al paciente a escribir directamente al WhatsApp 👉 +56 9 8996 7350 para continuar el proceso con un humano.
-
-FUNCIONES PRINCIPALES
-- Si el usuario pregunta por disponibilidad general o para un día/semana/mes específico, consulta los horarios usando la lógica de calendario interna.
-- Si se encuentran horarios, sugiere hasta 3-5 horarios concretos. Si el usuario pidió un día/franja específica, enfócate en eso.
-- Si el usuario pide una hora específica y está disponible, confírmala.
-- Si el usuario pide una hora específica y NO está disponible, informa que no está e idealmente sugiere alternativas cercanas SI LAS HAY para ESE MISMO DÍA. Si no hay alternativas ese día para esa hora, simplemente informa que no está disponible para esa hora y día.
-- Si no se encuentran horarios para la consulta específica, informa claramente que no hay disponibilidad para esos criterios.
-- Siempre finaliza las consultas de horario (encuentres o no) con: "Recuerda que puedo revisar horarios para los próximos 7 días aproximadamente. Para fechas más lejanas o cualquier otra duda, ¡escríbenos por WhatsApp al 👉 +56 9 8996 7350 y te ayudamos con más detalle! 😊". No ofrezcas buscar otros horarios tú mismo a menos que el usuario lo pida.
-
-INFORMACIÓN IMPORTANTE
-PRECIOS
-1 sesión: $40.000
-Pack 2 sesiones: $70.000
-Pack 3 sesiones: $100.000
-Pack 5 sesiones: $160.000
-Pack 10 sesiones: $300.000
-Los packs pueden ser compartidos entre personas distintas si se pagan en un solo abono.
-
-DIRECCIÓN
-Atendemos en Copiapó, en el Centro de Salud Fleming, Van Buren 129.
-Si quieres más información o agendar, escribe directamente al WhatsApp 👉 +56 9 8996 7350
-
-¿QUÉ ES LA QUIROPRAXIA?
-Si el paciente lo pregunta, comparte este video:
-https://youtu.be/EdEZyZUDAw0 (Nota: Este enlace es un placeholder, reemplázalo por el real si existe)
-
-ESTILO DE COMUNICACIÓN
-Usa un estilo conversacional cálido, informal pero profesional. 
-No repitas siempre la misma estructura. Varía tus respuestas. 
-Si un usuario es simpático o usa humor, puedes ser un poco más cercano. 
-Nunca seas frío ni robótico. Siempre busca generar una experiencia amable y humana.
-
-Usa siempre un lenguaje amable, claro, empático, cálido y confiable.
-Eres un asistente experto y servicial, pero nunca frío ni robótico.`;
+    console.log(`System Prompt para OpenAI (clientId: ${requestClientId}, primeros 500 chars):`, finalSystemPrompt.substring(0, 500) + "...");
 
     const chatResponse = await openai.chat.completions.create({
-      model: MODEL,
+      model: MODEL_FALLBACK,
       messages: [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: finalSystemPrompt },
         { role: 'user', content: message }
       ]
     });
 
-    const gptReply = chatResponse.choices[0].message.content.trim();
+    let gptReply = chatResponse.choices[0].message.content.trim();
+    
+    console.log('✅ Respuesta generada (OpenAI):', gptReply);
+    if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: gptReply, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
     return res.status(200).json({ response: gptReply });
 
   } catch (error) {
-    console.error('❌ Error en Rigbot:', error);
+    console.error(`❌ Error en Rigbot para clientId ${requestClientId}:`, error);
     console.error(error.stack);
-    return res.status(500).json({ error: 'Ocurrió un error en Rigbot. ' + error.message });
+    const errorForUser = 'Ocurrió un error inesperado en Rigbot. Por favor, intenta más tarde o contacta a soporte si el problema persiste.';
+    if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno: ${error.message}. UserMsg: ${errorForUser}`, sessionId: currentSessionId, ip: ipAddress }); } catch(e){console.error("Log Error:",e)} }
+    return res.status(500).json({ error: errorForUser, details: process.env.NODE_ENV === 'development' ? error.message + (error.stack ? `\nStack: ${error.stack.substring(0,300)}...` : '') : undefined });
   }
 }
