@@ -1,15 +1,16 @@
 // rigbot-product/pages/api/widget.js
-
 export default function handler(req, res) {
   const clientId = req.query.clientId || "demo-client"; 
   const clave = req.query.clave || null;
 
-  // Determina la URL base del rigbot-product.
-  // En Vercel, process.env.VERCEL_URL incluye el dominio.
-  // Para local, necesitas definirlo o tener un fallback.
   const protocol = process.env.NODE_ENV === 'development' ? 'http://' : 'https://';
-  const host = process.env.VERCEL_URL || (process.env.NODE_ENV === 'development' ? 'localhost:3001' : 'tu-dominio-de-produccion-rigbot-product.com'); // Ajusta localhost:3001 si es necesario
-  const widgetCoreSrc = `${protocol}${host}/rigbot-widget-core.js`;
+  // Para Vercel, process.env.VERCEL_URL es el dominio del deployment actual.
+  // Si estás probando localmente rigbot-product y se sirve en un puerto diferente
+  // al que accede rigsite-web, podrías tener que ajustar esto o usar la URL completa.
+  const host = process.env.VERCEL_URL || (process.env.NODE_ENV === 'development' ? `localhost:${process.env.PORT || 3001}` : 'tu-dominio-de-produccion-rigbot-product.com'); 
+  // Asegúrate que 'tu-dominio-de-produccion-rigbot-product.com' sea el dominio correcto de rigbot-product si VERCEL_URL no está disponible.
+
+  const widgetCoreSrc = `<span class="math-inline">\{protocol\}</span>{host}/rigbot-widget-core.js`;
 
   const scriptContent = `
 (() => {
@@ -23,9 +24,8 @@ export default function handler(req, res) {
   coreScript.defer = true;
   coreScript.onerror = () => {
     console.error("[Rigbot Loader] Falló la carga de rigbot-widget-core.js desde ${widgetCoreSrc}");
-    // Opcional: Muestra un mensaje de error en la página del usuario
     const errorNotifier = document.createElement('div');
-    errorNotifier.innerText = 'Error: El asistente Rigbot no pudo cargarse.';
+    errorNotifier.innerText = 'Error: El asistente Rigbot no pudo cargarse (core).';
     errorNotifier.style.cssText = 'position:fixed; bottom:10px; left:10px; padding:10px; background:red; color:white; z-index:10000; border-radius:5px;';
     document.body.appendChild(errorNotifier);
     setTimeout(() => { errorNotifier.remove(); }, 5000);
