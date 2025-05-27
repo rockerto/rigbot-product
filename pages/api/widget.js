@@ -1,39 +1,39 @@
+// rigbot-product/pages/api/widget.js
+
 export default function handler(req, res) {
-  const { clientid } = req.query;
-  
-  // Puedes personalizar el widget según clientid en futuro
-  const widgetCode = `
-    (function(){
-      var chatBubble = document.createElement('div');
-      chatBubble.id = 'rigbot-bubble';
-      chatBubble.style.position = 'fixed';
-      chatBubble.style.bottom = '20px';
-      chatBubble.style.right = '20px';
-      chatBubble.style.width = '60px';
-      chatBubble.style.height = '60px';
-      chatBubble.style.backgroundColor = '#3b82f6';
-      chatBubble.style.borderRadius = '50%';
-      chatBubble.style.boxShadow = '0 4px 6px rgba(0,0,0,0.1)';
-      chatBubble.style.cursor = 'pointer';
-      chatBubble.innerHTML = '<span style="font-size:30px;color:white;position:absolute;top:10px;left:18px;">💬</span>';
-      document.body.appendChild(chatBubble);
+  const clientId = req.query.clientId || "demo-client"; 
+  const clave = req.query.clave || null;
 
-      chatBubble.onclick = function() {
-        var iframe = document.createElement('iframe');
-        iframe.src = 'https://tu-vercel-app-url/chat?clientid=${clientid}';
-        iframe.style.position = 'fixed';
-        iframe.style.bottom = '80px';
-        iframe.style.right = '20px';
-        iframe.style.width = '400px';
-        iframe.style.height = '600px';
-        iframe.style.border = '1px solid #ccc';
-        iframe.style.zIndex = '99999';
-        iframe.style.backgroundColor = 'white';
-        document.body.appendChild(iframe);
-      }
-    })();
-  `;
+  // Determina la URL base del rigbot-product.
+  // En Vercel, process.env.VERCEL_URL incluye el dominio.
+  // Para local, necesitas definirlo o tener un fallback.
+  const protocol = process.env.NODE_ENV === 'development' ? 'http://' : 'https://';
+  const host = process.env.VERCEL_URL || (process.env.NODE_ENV === 'development' ? 'localhost:3001' : 'tu-dominio-de-produccion-rigbot-product.com'); // Ajusta localhost:3001 si es necesario
+  const widgetCoreSrc = `${protocol}${host}/rigbot-widget-core.js`;
 
-  res.setHeader('Content-Type', 'application/javascript');
-  res.send(widgetCode);
+  const scriptContent = `
+(() => {
+  window.RIGBOT_CLIENT_ID = "${String(clientId)}";
+  ${clave ? `window.RIGBOT_CLAVE = "${String(clave)}";` : 'delete window.RIGBOT_CLAVE;'}
+
+  console.log("[Rigbot Loader] Inicializando widget con ClientID:", window.RIGBOT_CLIENT_ID, "y Clave:", window.RIGBOT_CLAVE !== undefined ? window.RIGBOT_CLAVE : 'N/A');
+
+  const coreScript = document.createElement("script");
+  coreScript.src = "${widgetCoreSrc}";
+  coreScript.defer = true;
+  coreScript.onerror = () => {
+    console.error("[Rigbot Loader] Falló la carga de rigbot-widget-core.js desde ${widgetCoreSrc}");
+    // Opcional: Muestra un mensaje de error en la página del usuario
+    const errorNotifier = document.createElement('div');
+    errorNotifier.innerText = 'Error: El asistente Rigbot no pudo cargarse.';
+    errorNotifier.style.cssText = 'position:fixed; bottom:10px; left:10px; padding:10px; background:red; color:white; z-index:10000; border-radius:5px;';
+    document.body.appendChild(errorNotifier);
+    setTimeout(() => { errorNotifier.remove(); }, 5000);
+  };
+  document.head.appendChild(coreScript);
+})();
+  `.trim();
+
+  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+  res.status(200).send(scriptContent);
 }
