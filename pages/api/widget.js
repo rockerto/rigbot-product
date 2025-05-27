@@ -3,9 +3,12 @@ export default function handler(req, res) {
   const clientId = req.query.clientId || "demo-client"; 
   const clave = req.query.clave || null;
 
-  // Ya no necesitamos construir el host dinámicamente para el widgetCoreSrc
-  // usaremos una ruta relativa.
-  const widgetCoreSrc = "/rigbot-widget-core.js"; // ¡Ruta relativa!
+  // Define la URL base PÚBLICA y CANÓNICA de tu backend rigbot-product.
+  // Usaremos la que me confirmaste.
+  const publicBackendDomain = "https://rigbot-product.vercel.app";
+
+  // Construimos la URL absoluta para el script principal del widget
+  const widgetCoreSrc = `${publicBackendDomain}/rigbot-widget-core.js`;
 
   const scriptContent = `
 (() => {
@@ -19,23 +22,23 @@ export default function handler(req, res) {
   const coreScriptElement = document.createElement("script");
   console.log("[Rigbot Loader Script] Elemento <script> para el core creado.");
   
-  const calculatedCoreSrc = "${widgetCoreSrc}"; // Ahora será "/rigbot-widget-core.js"
-  console.log("[Rigbot Loader Script] URL calculada para rigbot-widget-core.js:", calculatedCoreSrc);
+  const calculatedCoreSrc = "${widgetCoreSrc}"; // Ahora será una URL absoluta
+  console.log("[Rigbot Loader Script] URL ABSOLUTA calculada para rigbot-widget-core.js:", calculatedCoreSrc);
   
-  if (!calculatedCoreSrc) { // Chequeo simple, aunque con ruta relativa es menos probable que falle aquí
-    console.error("[Rigbot Loader Script] ERROR: La URL para rigbot-widget-core.js es inválida.");
+  if (!calculatedCoreSrc || !calculatedCoreSrc.startsWith("http")) {
+    console.error("[Rigbot Loader Script] ERROR: La URL para rigbot-widget-core.js es inválida:", calculatedCoreSrc);
     return; 
   }
 
-  coreScriptElement.src = calculatedCoreSrc; // El navegador completará esto con el host actual
+  coreScriptElement.src = calculatedCoreSrc;
   coreScriptElement.defer = true;
   
   coreScriptElement.onload = () => {
-    console.log("[Rigbot Loader Script] rigbot-widget-core.js CARGADO EXITOSAMENTE desde la ruta relativa:", calculatedCoreSrc);
+    console.log("[Rigbot Loader Script] rigbot-widget-core.js CARGADO EXITOSAMENTE desde:", calculatedCoreSrc);
   };
   
-  coreScriptElement.onerror = () => {
-    console.error("[Rigbot Loader Script] ERROR AL CARGAR rigbot-widget-core.js usando la ruta relativa:", calculatedCoreSrc);
+  coreScriptElement.onerror = (event) => { 
+    console.error("[Rigbot Loader Script] ERROR AL CARGAR rigbot-widget-core.js desde:", calculatedCoreSrc, "Evento de error:", event);
     const errorDivId = 'rigbot-core-load-error-notifier';
     if (!document.getElementById(errorDivId)) {
         const errorDiv = document.createElement('div');
