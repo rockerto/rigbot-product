@@ -1,619 +1,614 @@
 // rigbot-product/pages/api/chat.js
-
-import { getCalendarClient } from '@/lib/google';
-
+import { google } from 'googleapis';
+import { getCalendarClient as getDefaultCalendarClient } from '@/lib/google';
 import OpenAI from 'openai';
-
 import { logRigbotMessage } from "@/lib/rigbotLog";
-
 import { DEFAULT_SYSTEM_PROMPT_TEMPLATE } from '@/lib/defaultSystemPromptTemplate';
-
-import { db } from '@/lib/firebase-admin'; // db se inicializa en firebase-admin.ts
-
-// 'doc' y 'getDoc' para Admin SDK se acceden a través de la instancia db: db.collection().doc() y docRef.get()
-
-
+import { db } from '@/lib/firebase-admin';
 
 const openai = new OpenAI({
-
   apiKey: process.env.OPENAI_API_KEY
-
 });
 
-
-
 const MODEL_FALLBACK = process.env.OPENAI_MODEL || 'gpt-4o';
-
 const CHILE_UTC_OFFSET_HOURS = -4;
-
 const WHATSAPP_FALLBACK_PLACEHOLDER = "+56900000000";
 
-
-
 const defaultConfig = {
-
   basePrompt: process.env.RIGBOT_PROMPT || DEFAULT_SYSTEM_PROMPT_TEMPLATE,
-
-  calendarQueryDays: 7,
-
-  calendarMaxUserRequestDays: 21,
-
-  maxSuggestions: 5,
-
+  calendarQueryDays: 7, // Este valor será usado si no viene de Firestore
+  calendarMaxUserRequestDays: 21, // Este valor será usado si no viene de Firestore
+  maxSuggestions: 5, // Este valor será usado si no viene de Firestore
   whatsappNumber: process.env.RIGBOT_DEFAULT_WSP || WHATSAPP_FALLBACK_PLACEHOLDER,
-
   pricingInfo: "Nuestros precios son competitivos. Por favor, consulta al contactarnos.",
-
-  direccion: "Nuestra consulta está en Copiapó. Te daremos los detalles exactos al agendar.",
-
-  horario: "Atendemos de Lunes a Viernes, de 10:00 a 19:30.",
-
+  direccion: "Nuestra consulta está en Copiapó. Te daremos los detalles exactos al agendar.", // Ejemplo, se sobrescribe por cliente
+  horario: "Atendemos de Lunes a Viernes, de 10:00 a 19:30.", // Ejemplo, se sobrescribe por cliente
   chiropracticVideoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-
   telefono: ""
-
 };
 
-
-
-// La función getClientConfig se integrará/modificará dentro del handler principal para acceso directo
-
-// a clientDocSnap y para manejar los errores de seguridad directamente.
-
-
-
-// ... (tus funciones convertChileTimeToUtc y getDayIdentifier se mantienen igual) ...
-
 function convertChileTimeToUtc(baseDateUtcDay, chileHour, chileMinute) {
-
   let utcHour = chileHour - CHILE_UTC_OFFSET_HOURS;
-
   const newUtcDate = new Date(baseDateUtcDay);
-
   newUtcDate.setUTCHours(utcHour, chileMinute, 0, 0);
-
   return newUtcDate;
-
 }
-
-
 
 function getDayIdentifier(dateObj, timeZone) {
-
   return new Intl.DateTimeFormat('en-CA', {
-
     year: 'numeric', month: '2-digit', day: '2-digit',
-
     timeZone: timeZone
-
   }).format(dateObj);
-
 }
 
+// Funciones auxiliares para mensajes de WhatsApp (restauradas y adaptadas)
+function getWhatsappContactMessage(contactNumber) {
+    const wsp = String(contactNumber || '').trim();
+   if (wsp && wsp !== WHATSAPP_FALLBACK_PLACEHOLDER && wsp !== "") {
+     return ` Para más detalles o para agendar, conversemos por WhatsApp 👉 ${wsp}`;
+   }
+   return " Para más detalles o para agendar, por favor contáctanos a través de nuestros canales principales.";
+}
+
+function getWhatsappDerivationSuffix(contactNumber) {
+    const wsp = String(contactNumber || '').trim();
+   if (wsp && wsp !== WHATSAPP_FALLBACK_PLACEHOLDER && wsp !== "") {
+     return ` ¡Escríbenos por WhatsApp al 👉 ${wsp}!`;
+   }
+   return " ¡Contáctanos para coordinar!";
+}
 
 
 export default async function handler(req, res) {
-
+  // --- Lógica de CORS (del Frankenstein) ---
   const allowedOriginsString = process.env.ALLOWED_ORIGINS || "https://rigsite-web.vercel.app";
-
   const allowedOrigins = allowedOriginsString.split(',').map(origin => origin.trim());
-
   const requestOrigin = req.headers.origin;
-
   let corsOriginSet = false;
-
-
-
   if (requestOrigin) {
-
     if (allowedOrigins.includes(requestOrigin)) {
-
       res.setHeader('Access-Control-Allow-Origin', requestOrigin);
-
       corsOriginSet = true;
-
     } else if (process.env.NODE_ENV === 'development' && requestOrigin.startsWith('http://localhost:')) {
-
       res.setHeader('Access-Control-Allow-Origin', requestOrigin);
-
       corsOriginSet = true;
-
-      console.log("INFO CORS: Origen localhost de desarrollo permitido:", requestOrigin);
-
-    } else {
-
-      console.warn("WARN CORS: Origen no está en la lista de permitidos y no es localhost dev:", requestOrigin, "| Permitidos:", allowedOrigins.join(' '));
-
     }
-
-  } else {
-
-    console.log("INFO CORS: No se detectó header 'origin'. Se asume same-origin o no-CORS (ej. Postman).");
-
   }
-
-  
-
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Client-ID, Authorization'); // Considera añadir 'X-Rigbot-Clave' si la envías por header
-
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Client-ID, Authorization'); 
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-
-
-
   if (req.method === 'OPTIONS') {
-
-    console.log("INFO: Recibida solicitud OPTIONS para CORS preflight desde:", requestOrigin, "| CORS permitido para origin?:", corsOriginSet);
-
-    if (corsOriginSet) {
-
-        return res.status(204).end(); 
-
-    } else {
-
-        console.warn("WARN CORS: Solicitud OPTIONS de origen no permitido:", requestOrigin, "será bloqueada por el navegador si no es same-origin.");
-
-        return res.status(403).json({ error: "Origen no permitido por CORS."}); 
-
-    }
-
+    if (corsOriginSet) { return res.status(204).end(); } 
+    else { return res.status(403).json({ error: "Origen no permitido por CORS."}); }
   }
-
-
-
-  if (req.method !== 'POST') { // Mover esta verificación más arriba
-
-    const errorResponsePayload = { error: 'Método no permitido' };
-
-    // No hay sessionId ni ipAddress definidos aún aquí para loguear, considerar si es necesario
-
-    return res.status(405).json(errorResponsePayload);
-
+  if (req.method !== 'POST') { 
+    return res.status(405).json({ error: 'Método no permitido' });
   }
-
-
-
-  // Desestructurar el cuerpo de la solicitud
+  // --- Fin Lógica de CORS ---
 
   const { message, sessionId: providedSessionId, clientId: bodyClientId, clave: incomingClave } = req.body || {};
+  const requestClientId = bodyClientId; 
 
-  
-
-  // Determinar el clientId a usar
-
-  // Si la clave es para autenticar el widget con el cliente, el clientId siempre debe venir del cuerpo.
-
-  // No debería haber un fallback a 'demo-client' si la seguridad depende del clientId y la clave.
-
-  const requestClientId = bodyClientId; //  Quitamos || req.headers['x-client-id'] || "demo-client"; para que sea estricto del body
-
-
-
-  console.log(`INFO: Request entrante POST para /api/chat. ClientId desde body: ${requestClientId}, Clave desde body: ${incomingClave ? 'Presente' : 'Ausente'}`);
-
-
+  console.log(`INFO: Request POST para /api/chat. ClientId: ${requestClientId}, Clave: ${incomingClave ? 'Presente' : 'Ausente'}`);
 
   const ipAddress = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null;
-
   const currentSessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
-
-
   if (!db) { 
-
-      console.error("FATAL en chat.js: Instancia de Firestore (db) NO DISPONIBLE...");
-
-      return res.status(500).json({ error: 'Error interno crítico del servidor. Contacta al administrador.' });
-
+      console.error("FATAL en chat.js: Firestore (db) NO DISPONIBLE.");
+      return res.status(500).json({ error: 'Error interno crítico del servidor.' });
   }
 
-
-
-  // --- INICIO FASE 1: Validar clientId ---
-
+  // --- VALIDACIÓN DE CLIENTID Y CLAVE (del Frankenstein) ---
   if (!requestClientId || typeof requestClientId !== 'string') {
-
-    console.warn('API Chat: Intento de acceso con clientId no válido o no proporcionado en el body.');
-
-    // No loguear a Firestore aquí ya que no tenemos un clientId válido.
-
+    // No loguear a Firestore aquí ya que no tenemos un clientId válido.
     return res.status(400).json({ error: "Client ID no válido o no proporcionado." });
-
   }
-
-  // Evitar que "demo-client" o similar accedan a lógica protegida si no deberían.
-
-  // Si "demo-client" es para un demo público sin clave, esta lógica necesitaría ajustarse.
-
-  // Por ahora, asumimos que todo clientId debe existir en Firestore para mayor seguridad.
-
-
-
   let clientDocSnap;
-
   let clientConfigData;
-
   try {
-
     const clientDocRef = db.collection('clients').doc(requestClientId);
-
     clientDocSnap = await clientDocRef.get();
-
-
-
     if (!clientDocSnap.exists) {
-
-      console.warn(`API Chat: ClientId '${requestClientId}' no registrado en Firestore. Acceso denegado.`);
-
-      // No loguear a Firestore aquí.
-
+      console.warn(`API Chat: ClientId '${requestClientId}' no registrado en Firestore. Acceso denegado.`);
       return res.status(403).json({ error: "Client ID no registrado. Acceso denegado." });
-
     }
-
-    clientConfigData = clientDocSnap.data(); // Obtenemos los datos aquí
-
-    console.log(`API Chat: Configuración encontrada para clientId: ${requestClientId}`);
-
-
-
+    clientConfigData = clientDocSnap.data();
+    console.log(`API Chat: Configuración del cliente ${requestClientId} obtenida de Firestore.`);
   } catch (error) {
-
     console.error(`API Chat: Error al verificar clientId '${requestClientId}' en Firestore:`, error);
-
-    // No loguear a Firestore aquí.
-
     return res.status(500).json({ error: "Error interno al verificar el cliente." });
-
   }
-
-  // --- FIN FASE 1 ---
-
-
-
-  // --- INICIO FASE 2: Validar clave si existe ---
-
-  const expectedClave = clientConfigData?.clave; // La clave guardada en Firestore para este cliente
-
-
-
-  // Si existe una clave configurada en Firestore para este cliente Y NO es una cadena vacía
-
+  const expectedClave = clientConfigData?.clave;
   if (expectedClave && typeof expectedClave === 'string' && expectedClave.trim() !== "") {
-
     if (expectedClave !== incomingClave) { 
-
-      console.warn(`API Chat: Clave incorrecta para clientId '${requestClientId}'. Recibida: '${incomingClave}', Esperada: (no mostrar en logs)`);
-
-      // Loguear el intento fallido, ahora que tenemos un clientId válido.
-
-      if (typeof logRigbotMessage === "function") { 
-
-        try { await logRigbotMessage({ role: "system", content: `Intento de acceso con clave incorrecta. UserMsg: ${message}`, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} 
-
-      }
-
+      if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "system", content: `Intento de acceso con clave incorrecta. UserMsg: ${message}`, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
       return res.status(401).json({ error: "Clave de API incorrecta para este Client ID." });
-
     }
-
-    console.log(`API Chat: Clave validada exitosamente para clientId '${requestClientId}'.`);
-
   }
+  // --- FIN VALIDACIÓN ---
 
-  // Si no hay 'expectedClave' en Firestore (o es vacía), no se requiere validación de clave, la solicitud continúa.
-
-  // --- FIN FASE 2 ---
-
-
-
-  // Continuación de la lógica del handler...
-
-  if (!message) {
-
+  if (!message) { 
     const errorResponsePayload = { error: 'Falta el mensaje del usuario' };
-
     if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error: ${errorResponsePayload.error}`, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
-
     return res.status(400).json(errorResponsePayload);
-
   }
-
-
-
   if (typeof logRigbotMessage === "function") { 
-
-    try {
-
-      await logRigbotMessage({ role: "user", content: message, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId });
-
-    } catch (logErr) {
-
-      console.error("Error al loguear mensaje de usuario en Firestore:", logErr);
-
-    }
-
+    try { await logRigbotMessage({ role: "user", content: message, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } 
+    catch (logErr) { console.error("Error al loguear mensaje de usuario en Firestore:", logErr); }
   }
-
-
-
-  // Ya tenemos clientConfigData de la Fase 1
 
   let effectiveConfig = { ...defaultConfig };
-
-
-
-  if (clientConfigData) { // clientConfigData ya está definido y verificado
-
-    console.log("INFO: Datos crudos desde Firestore:", JSON.stringify(clientConfigData, null, 2));
-
-    effectiveConfig.basePrompt = clientConfigData.basePrompt || defaultConfig.basePrompt;
-
-    // ... (resto de la asignación de effectiveConfig como lo tenías) ...
-
-    effectiveConfig.whatsappNumber = clientConfigData.whatsappNumber || defaultConfig.whatsappNumber;
-
-    effectiveConfig.pricingInfo = clientConfigData.pricingInfo || defaultConfig.pricingInfo;
-
-    effectiveConfig.direccion = clientConfigData.direccion || defaultConfig.direccion;
-
-    effectiveConfig.horario = clientConfigData.horario || defaultConfig.horario;
-
-    effectiveConfig.chiropracticVideoUrl = clientConfigData.chiropracticVideoUrl || defaultConfig.chiropracticVideoUrl;
-
-    effectiveConfig.telefono = clientConfigData.telefono || defaultConfig.telefono;
-
-
-
-    const firestoreCalendarQueryDays = Number(clientConfigData.calendarQueryDays);
-
-    if (!isNaN(firestoreCalendarQueryDays) && firestoreCalendarQueryDays > 0) {
-
-        effectiveConfig.calendarQueryDays = firestoreCalendarQueryDays;
-
-    } else if (clientConfigData.calendarQueryDays !== undefined) {
-
-        console.warn(`WARN: calendarQueryDays ('${clientConfigData.calendarQueryDays}') desde Firestore para ${requestClientId} no es válido, usando default: ${defaultConfig.calendarQueryDays}`);
-
-    }
-
-    const firestoreCalendarMaxUserRequestDays = Number(clientConfigData.calendarMaxUserRequestDays);
-
-    if (!isNaN(firestoreCalendarMaxUserRequestDays) && firestoreCalendarMaxUserRequestDays > 0) {
-
-        effectiveConfig.calendarMaxUserRequestDays = firestoreCalendarMaxUserRequestDays;
-
-    } else if (clientConfigData.calendarMaxUserRequestDays !== undefined) {
-
-        console.warn(`WARN: calendarMaxUserRequestDays ('${clientConfigData.calendarMaxUserRequestDays}') desde Firestore para ${requestClientId} no es válido, usando default: ${defaultConfig.calendarMaxUserRequestDays}`);
-
-    }
-
-    const firestoreMaxSuggestions = Number(clientConfigData.maxSuggestions);
-
-    if (!isNaN(firestoreMaxSuggestions) && firestoreMaxSuggestions >= 0) {
-
-        effectiveConfig.maxSuggestions = firestoreMaxSuggestions;
-
-    } else if (clientConfigData.maxSuggestions !== undefined) {
-
-        console.warn(`WARN: maxSuggestions ('${clientConfigData.maxSuggestions}') desde Firestore para ${requestClientId} no es válido, usando default: ${defaultConfig.maxSuggestions}`);
-
-    }
-
-
-
-  } else {
-
-    // Este caso ya no debería ocurrir debido a la validación de la Fase 1,
-
-    // a menos que permitas un requestClientId que no esté en Firestore (ej. "demo-client" sin config)
-
-    // Si `requestClientId` siempre debe existir, este else es redundante.
-
-    console.log(`INFO: No se encontraron datos en Firestore para ${requestClientId}, usando configuración por defecto completa (esto no debería pasar si el clientId es obligatorio).`);
-
+  if (clientConfigData) { 
+    console.log("INFO: Datos crudos de config del cliente desde Firestore:", JSON.stringify(clientConfigData, null, 2));
+    effectiveConfig = { ...defaultConfig, ...clientConfigData }; 
+    effectiveConfig.calendarQueryDays = Number(clientConfigData.calendarQueryDays) || defaultConfig.calendarQueryDays;
+    effectiveConfig.calendarMaxUserRequestDays = Number(clientConfigData.calendarMaxUserRequestDays) || defaultConfig.calendarMaxUserRequestDays;
+    effectiveConfig.maxSuggestions = clientConfigData.maxSuggestions !== undefined ? Number(clientConfigData.maxSuggestions) : defaultConfig.maxSuggestions;
+    effectiveConfig.whatsappNumber = String(clientConfigData.whatsappNumber || defaultConfig.whatsappNumber).trim();
+    // Asegurar que otros campos de texto usen el del cliente o el default
+    effectiveConfig.pricingInfo = String(clientConfigData.pricingInfo || defaultConfig.pricingInfo);
+    effectiveConfig.direccion = String(clientConfigData.direccion || defaultConfig.direccion);
+    effectiveConfig.horario = String(clientConfigData.horario || defaultConfig.horario);
+    effectiveConfig.chiropracticVideoUrl = String(clientConfigData.chiropracticVideoUrl || defaultConfig.chiropracticVideoUrl);
+    effectiveConfig.telefono = String(clientConfigData.telefono || defaultConfig.telefono);
   }
-
-
-
   console.log("🧠 Configuración efectiva usada para clientId", requestClientId, ":", JSON.stringify(effectiveConfig, null, 2));
 
-
-
-  // ... (resto de tu lógica de getWhatsappContactMessage, isCalendarQuery, OpenAI, etc.)
-
-  // Asegúrate de pasar `clientId: requestClientId` a `logRigbotMessage` en todas las llamadas.
-
-
-
   try {
-
     console.log(`📨 Mensaje ("${message}") recibido para ${requestClientId}`);
-
     const lowerMessage = message.toLowerCase();
-
-
-
-    const calendarKeywords = [ /* ... tus keywords ... */ 
-
-        'hora', 'turno', 'disponibilidad', 'agenda', 'cuando', 'horario', 'disponible', 'libre', 'atiendes', 
-
-        'ver', 'revisar', 'chequear', 'consultar', 'lunes', 'martes', 'miercoles', 'miércoles', 'jueves', 
-
-        'viernes', 'sabado', 'sábado', 'domingo', 'hoy', 'mañana', 'tarde', 'a las', 'para el', 
-
-        'tienes algo', 'hay espacio', 'agendar', 'agendamiento', 'proxima semana', 'próxima semana', 
-
-        'prixima semana', 'procsima semana', 'proxima semama', 'proximo', 'próximo', 'priximo', 'procsimo'
-
+    const calendarKeywords = [ 
+      'hora', 'turno', 'disponibilidad', 'agenda', 'cuando', 'horario', 
+      'disponible', 'libre', 'atiendes', 'ver', 'revisar', 'chequear', 'consultar',
+      'lunes', 'martes', 'miercoles', 'miércoles', 'jueves', 'viernes', 'sabado', 'sábado', 'domingo',
+      'hoy', 'mañana', 'tarde', 'a las', 'para el', 'tienes algo', 'hay espacio', 
+      'agendar', 'agendamiento',
+      'proxima semana', 'próxima semana', 'prixima semana', 'procsima semana', 'proxima semama',
+      'proximo', 'próximo', 'priximo', 'procsimo'
     ];
-
     const isCalendarQuery = calendarKeywords.some(keyword => lowerMessage.includes(keyword));
 
-
-
     if (isCalendarQuery) {
+      // =========== INICIO DEL TRASPLANTE DESDE PROTOTIPO DORADO (CON ADAPTACIONES) ===========
+      console.log(`⏳ Detectada consulta de calendario para ${requestClientId}`); // Log adaptado
+      let calendar; // Esta variable será inicializada por la lógica de Frankenstein más abajo
 
-      // ... (TODA TU LÓGICA DE CALENDARIO COMPLEJA VA AQUÍ) ...
+      // Lógica de Frankenstein para inicializar 'calendar' (cliente específico o default)
+      if (clientConfigData && clientConfigData.googleCalendarConnected && clientConfigData.googleCalendarTokens) {
+        console.log(`INFO: Cliente ${requestClientId} tiene Google Calendar conectado. Email: ${clientConfigData.googleCalendarEmail || 'No disponible en config'}. Intentando usar sus tokens.`);
+        try {
+          const oauth2Client = new google.auth.OAuth2(
+            process.env.GOOGLE_CLIENT_ID,
+            process.env.GOOGLE_CLIENT_SECRET,
+            process.env.GOOGLE_REDIRECT_URI 
+          );
+          oauth2Client.setCredentials(clientConfigData.googleCalendarTokens);
 
-      // Ejemplo simplificado de cómo pasaría el clientId al log:
-
-      // if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ ..., clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
-
-      // return res.status(200).json({ response: replyCalendar });
-
-            console.log('⏳ Detectada consulta de calendario para', requestClientId);
-
-            let calendar;
-
+          if (clientConfigData.googleCalendarTokens.refresh_token && 
+              clientConfigData.googleCalendarTokens.expiry_date &&
+              new Date().getTime() > (clientConfigData.googleCalendarTokens.expiry_date - 5 * 60 * 1000)) {
+            console.log(`INFO: Access token para ${requestClientId} (Email: ${clientConfigData.googleCalendarEmail}) expirado o por expirar. Intentando refrescar...`);
             try {
-
-              calendar = await getCalendarClient();
-
-              if (!calendar || typeof calendar.events?.list !== 'function') {
-
-                throw new Error("Cliente de calendario no inicializado correctamente.");
-
-              }
-
-            } catch (clientError) {
-
-              console.error("❌ Error al obtener el cliente de Google Calendar para", requestClientId, ":", clientError);
-
-              const errorResponsePayload = { error: 'No se pudo conectar con el servicio de calendario.', details: clientError.message };
-
-              if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno: ${errorResponsePayload.error} Detalles: ${errorResponsePayload.details}`, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId });} catch(e){console.error("Log Error:",e)} }
-
-              return res.status(500).json(errorResponsePayload);
-
+                const { credentials } = await oauth2Client.refreshAccessToken();
+                oauth2Client.setCredentials(credentials); 
+                await db.collection("clients").doc(requestClientId).set(
+                    { googleCalendarTokens: credentials, googleCalendarLastSync: new Date().toISOString(), googleCalendarError: null },
+                    { merge: true }
+                );
+                console.log(`INFO: Access token refrescado y actualizado en Firestore para ${requestClientId}.`);
+                clientConfigData.googleCalendarTokens = credentials; 
+            } catch (refreshError) {
+                console.error(`ERROR: No se pudo refrescar el access token para ${requestClientId} (Email: ${clientConfigData.googleCalendarEmail}):`, refreshError.message);
+                await db.collection("clients").doc(requestClientId).set(
+                    { 
+                        googleCalendarConnected: false, 
+                        googleCalendarError: `Error al refrescar token: ${refreshError.message}. Por favor, reconecta tu calendario.`,
+                        googleCalendarTokens: null 
+                    },
+                    { merge: true }
+                );
+                console.warn(`WARN: Calendario desconectado para ${requestClientId} debido a error al refrescar token. Usando calendario por defecto.`);
+                calendar = await getDefaultCalendarClient(); 
             }
+          }
+          if (calendar === undefined) { 
+            calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+            console.log(`INFO: Usando Google Calendar del cliente ${requestClientId} (Email: ${clientConfigData.googleCalendarEmail || 'N/A'})`);
+          }
+        } catch (oauthError) {
+          console.error(`ERROR: No se pudo crear cliente OAuth2 para ${requestClientId} con sus tokens:`, oauthError.message);
+          console.log(`INFO: Volviendo al calendario por defecto para ${requestClientId}.`);
+          calendar = await getDefaultCalendarClient();
+        }
+      } else {
+        console.log(`INFO: Cliente ${requestClientId} no tiene Google Calendar conectado o faltan tokens. Usando calendario por defecto.`);
+        calendar = await getDefaultCalendarClient();
+      }
 
-            
+      if (!calendar || typeof calendar.events?.list !== 'function') {
+        console.error("ERROR: Cliente de calendario (ya sea del usuario o default) no está disponible o es inválido para", requestClientId);
+        const errorMsg = "Lo siento, estoy teniendo problemas para acceder a la información de horarios en este momento. Por favor, intenta más tarde.";
+        if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: errorMsg, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
+        return res.status(503).json({ response: errorMsg }); 
+      }
+      // --- Fin lógica de inicialización de 'calendar' de Frankenstein ---
+      // --- Ahora empieza la lógica del Prototipo Dorado para procesar este 'calendar' ---
 
-            // ... (Aquí iría tu lógica detallada de manejo de calendario, que es bastante extensa)
+      const serverNowUtc = new Date();
+      let targetDateForDisplay = null; 
+      let targetDateIdentifierForSlotFilter = null;
+      let targetHourChile = null;
+      let targetMinuteChile = 0;
+      let timeOfDay = null;
+      let isGenericNextWeekSearch = false;
 
-            // Me aseguraré de que cualquier logRigbotMessage dentro de esta sección también reciba requestClientId
+      const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
+      const currentMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1; 
+      const currentDayOfMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { day: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
+      const todayChile0000UtcTimestamp = Date.UTC(currentYearChile, currentMonthChile, currentDayOfMonthChile, 0 - CHILE_UTC_OFFSET_HOURS, 0, 0, 0);
+      const refDateForTargetCalc = new Date(todayChile0000UtcTimestamp);
+      const actualCurrentDayOfWeekInChile = refDateForTargetCalc.getUTCDay();
+      
+      const isProximoWordQuery = calendarKeywords.some(k => k.startsWith("proximo") && lowerMessage.includes(k));
+      const isAnyNextWeekIndicator = calendarKeywords.some(k => k.includes("semana") && lowerMessage.includes(k));
 
-            // Ejemplo de una respuesta de calendario (debes adaptar tu lógica existente)
-
-
-
-            // Esta es solo una simulación de la lógica del calendario
-
-            const availableSlotsOutput = ["lunes, 26 de mayo, 06:30 p. m."]; // Simulación
-
-            let replyCalendar = 'Simulación: Hay horas disponibles.';
-
-            if (availableSlotsOutput.length > 0) {
-
-                 replyCalendar = `¡Buenas noticias! 🎉 Encontré estas horitas disponibles:\n- ${availableSlotsOutput.join('\n- ')}\n\nPara reservar alguna o si buscas otra opción, ¡Escríbenos por WhatsApp al 👉 ${effectiveConfig.whatsappNumber}!`;
-
-            } else {
-
-                 replyCalendar = `¡Pucha! 😔 Parece que no tengo horas libres. ¿Te animas a que busquemos en otra fecha?`;
-
+      let specificDayKeywordIndex = -1;
+      const dayKeywordsList = [ 
+        { keyword: 'domingo', index: 0 }, { keyword: 'lunes', index: 1 }, { keyword: 'martes', index: 2 }, 
+        { keyword: 'miercoles', index: 3 }, { keyword: 'miércoles', index: 3 }, { keyword: 'jueves', index: 4 }, 
+        { keyword: 'viernes', index: 5 }, { keyword: 'sabado', index: 6 }, { keyword: 'sábado', index: 6 }
+      ];
+      for (const dayInfo of dayKeywordsList) { if (lowerMessage.includes(dayInfo.keyword)) { specificDayKeywordIndex = dayInfo.index; break; } }
+      
+      // Lógica de parseo de fecha (del Prototipo Dorado)
+      if (lowerMessage.includes('hoy')) {
+        targetDateForDisplay = new Date(refDateForTargetCalc);
+      } else if (lowerMessage.includes('mañana') && !lowerMessage.includes('pasado mañana')) {
+        targetDateForDisplay = new Date(refDateForTargetCalc);
+        targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + 1);
+      } else if (specificDayKeywordIndex !== -1) {
+        targetDateForDisplay = new Date(refDateForTargetCalc);
+        let daysToAdd = specificDayKeywordIndex - actualCurrentDayOfWeekInChile;
+        if (daysToAdd < 0) { daysToAdd += 7; }
+        if ((isAnyNextWeekIndicator && daysToAdd < 7) || (daysToAdd === 0 && isProximoWordQuery)) {
+          if (!(daysToAdd >=7 && isAnyNextWeekIndicator)) { daysToAdd += 7; }
+        } else if (daysToAdd === 0 && !isProximoWordQuery && serverNowUtc.getUTCHours() >= (19 - CHILE_UTC_OFFSET_HOURS)) {
+          daysToAdd += 7;
+        }
+        targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + daysToAdd);
+      } else if (isAnyNextWeekIndicator) { 
+          targetDateForDisplay = new Date(refDateForTargetCalc);
+          let daysUntilNextMonday = (1 - actualCurrentDayOfWeekInChile + 7) % 7;
+          if (daysUntilNextMonday === 0 && !isProximoWordQuery) daysUntilNextMonday = 7; // Si es lunes y no dice "próximo lunes", va al siguiente. Si dice "próximo lunes" isProximoWordQuery sería true y esta condición no se cumple.
+          targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + daysUntilNextMonday); 
+          isGenericNextWeekSearch = true; 
+      }
+      
+      if (targetDateForDisplay) {
+        console.log(`🎯 Fecha Objetivo (para mostrar y filtrar) para ${requestClientId}: ${new Intl.DateTimeFormat('es-CL', { dateStyle: 'full', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} (UTC: ${targetDateForDisplay.toISOString()})`);
+        const futureLimitCheckDate = new Date(refDateForTargetCalc); 
+        // Usar effectiveConfig para MAX_DAYS_FOR_USER_REQUEST
+        futureLimitCheckDate.setUTCDate(futureLimitCheckDate.getUTCDate() + effectiveConfig.calendarMaxUserRequestDays);
+        if (targetDateForDisplay >= futureLimitCheckDate) {
+            const formattedDateAsked = new Intl.DateTimeFormat('es-CL', { dateStyle: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay);
+            // Usar effectiveConfig para MAX_DAYS_FOR_USER_REQUEST y whatsappNumber
+            let reply = `¡Entiendo que buscas para el ${formattedDateAsked}! 😊 Por ahora, mi calendario mental solo llega hasta unos ${effectiveConfig.calendarMaxUserRequestDays} días en el futuro.${getWhatsappContactMessage(effectiveConfig.whatsappNumber)} y mis colegas humanos te ayudarán con gusto.`;
+            console.log('✅ Respuesta generada (fecha demasiado lejana):', reply);
+            if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: reply, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
+            return res.status(200).json({ response: reply }); 
+        }
+      }
+      
+      targetDateIdentifierForSlotFilter = (targetDateForDisplay && !isGenericNextWeekSearch) ? getDayIdentifier(targetDateForDisplay, 'America/Santiago') : null;
+      if(targetDateIdentifierForSlotFilter) { console.log(`🏷️ Identificador de Fecha para Filtro de Slots (Chile YAML-MM-DD) para ${requestClientId}: ${targetDateIdentifierForSlotFilter}`); } 
+      else if (targetDateForDisplay && isGenericNextWeekSearch) { console.log(`🏷️ Búsqueda genérica para ${requestClientId} para la semana que comienza el ${getDayIdentifier(targetDateForDisplay, 'America/Santiago')}, sin filtro de día específico.`); } 
+      else { console.log(`🏷️ Búsqueda genérica desde hoy para ${requestClientId}, sin filtro de día específico.`); }
+      
+      // Lógica de parseo de hora (del Prototipo Dorado)
+      const timeMatch = lowerMessage.match(/(\d{1,2})\s*(:(00|30|15|45))?\s*(pm|am|h|hr|hrs)?/i);
+      if (timeMatch) {
+        let hour = parseInt(timeMatch[1], 10);
+        targetMinuteChile = timeMatch[3] ? parseInt(timeMatch[3], 10) : 0; 
+        const isPm = timeMatch[4] && timeMatch[4].toLowerCase() === 'pm';
+        const isAm = timeMatch[4] && timeMatch[4].toLowerCase() === 'am';
+        if (isPm && hour >= 1 && hour <= 11) hour += 12;
+        if (isAm && hour === 12) hour = 0; 
+        targetHourChile = hour;
+        if (targetMinuteChile > 0 && targetMinuteChile < 15) targetMinuteChile = 0; // Ajustar a :00 o :30 como en el original
+       else if (targetMinuteChile >= 15 && targetMinuteChile < 30) targetMinuteChile = 0; // o 15 si manejas cuartos
+       else if (targetMinuteChile > 30 && targetMinuteChile < 45) targetMinuteChile = 30; // o 45
+       else if (targetMinuteChile >= 45 && targetMinuteChile < 60) targetMinuteChile = 30;
+        console.log(`⏰ Hora objetivo (Chile) para ${requestClientId}: ${targetHourChile}:${targetMinuteChile.toString().padStart(2,'0')}`);
+      }
+      // Lógica de timeOfDay (del Prototipo Dorado)
+      if (!targetHourChile && !isAnyNextWeekIndicator && !isProximoWordQuery && !(targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') !== getDayIdentifier(refDateForTargetCalc, 'America/Santiago'))) { 
+        if ((lowerMessage.includes('mañana') && !lowerMessage.includes('pasado mañana'))) {
+             if (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === getDayIdentifier(new Date(refDateForTargetCalc.getTime() + 24*60*60*1000), 'America/Santiago')) {
+                timeOfDay = 'morning'; // Default para "mañana"
+             }
+        } else if (lowerMessage.includes('tarde')) {
+            timeOfDay = 'afternoon';
+        }
+        if(timeOfDay) console.log(`🕒 Franja horaria solicitada para ${requestClientId}: ${timeOfDay}`);
+      }
+      
+      const WORKING_HOURS_CHILE_NUMERIC = [10, 10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14, 14.5, 15, 15.5, 16, 16.5, 17, 17.5, 18, 18.5, 19, 19.5];
+      if (targetHourChile !== null) {
+        const requestedTimeNumeric = targetHourChile + (targetMinuteChile / 60);
+        if (!WORKING_HOURS_CHILE_NUMERIC.includes(requestedTimeNumeric) || requestedTimeNumeric < 10 || requestedTimeNumeric > 19.5) {
+            let replyPreamble = `¡Ojo! 👀 Parece que las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
+            if (targetDateForDisplay) { 
+                replyPreamble = `¡Ojo! 👀 Parece que el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
             }
+            // Usar effectiveConfig.horario y whatsappNumber
+            let reply = `${replyPreamble} está fuera de nuestro horario de atención (${effectiveConfig.horario}). ¿Te gustaría buscar dentro de ese rango?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)}`;
+            console.log('✅ Respuesta generada (fuera de horario):', reply);
+            if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: reply, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
+            return res.status(200).json({ response: reply });
+        }
+      }
 
+      let calendarQueryStartUtc;
+      if (targetDateForDisplay) { calendarQueryStartUtc = new Date(targetDateForDisplay.getTime());} 
+      else { calendarQueryStartUtc = new Date(refDateForTargetCalc.getTime()); }
+      const calendarQueryEndUtc = new Date(calendarQueryStartUtc);
+      // Usar effectiveConfig para DAYS_TO_QUERY_CALENDAR
+      calendarQueryEndUtc.setUTCDate(calendarQueryStartUtc.getUTCDate() + effectiveConfig.calendarQueryDays); 
+      console.log(`🗓️ Google Calendar Query para ${requestClientId} (Calendario: ${clientConfigData?.googleCalendarConnected && clientConfigData.googleCalendarEmail ? clientConfigData.googleCalendarEmail : (clientConfigData?.googleCalendarConnected ? 'Cliente (email no obtenido)' : 'Default')}): De ${calendarQueryStartUtc.toISOString()} a ${calendarQueryEndUtc.toISOString()}`);
 
+      let googleResponse;
+      try {
+        console.log(`DEBUG: Intentando llamar a calendar.events.list para ${requestClientId}...`);
+        googleResponse = await calendar.events.list({
+          calendarId: 'primary', 
+          timeMin: calendarQueryStartUtc.toISOString(),
+          timeMax: calendarQueryEndUtc.toISOString(),
+          singleEvents: true,
+          orderBy: 'startTime'
+        });
+        console.log(`DEBUG: Llamada a calendar.events.list completada para ${requestClientId}.`);
+      } catch (googleError) {
+        console.error(`❌ ERROR DIRECTO en calendar.events.list para ${requestClientId}:`, googleError);
+        // Manejo de error de Frankenstein para desconectar si es authError
+        if (googleError.code === 401 || (googleError.errors && googleError.errors.some(e => e.reason === 'authError'))) {
+            console.warn(`WARN: Error de autenticación al leer calendario de ${requestClientId}. Desconectando su calendario.`);
+            await db.collection("clients").doc(requestClientId).set(
+                { googleCalendarConnected: false, googleCalendarError: `Error de autenticación al leer calendario: ${googleError.message}. Por favor, reconecta.`, googleCalendarTokens: null },
+                { merge: true }
+            );
+        }
+        const errorResponsePayload = { error: 'Error al consultar el calendario de Google.', details: googleError.message };
+        if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno: ${errorResponsePayload.error} Detalles: ${errorResponsePayload.details}`, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId });} catch(e){console.error("Log Error:",e)} }
+        return res.status(500).json(errorResponsePayload);
+      }
+      
+      // Lógica de busySlots y availableSlotsOutput (del Prototipo Dorado)
+      const eventsFromGoogle = googleResponse?.data?.items || [];
+      const busySlots = eventsFromGoogle.filter(e => e.status !== 'cancelled')
+        .map(e => {
+          if (e.start?.dateTime && e.end?.dateTime) {
+            return { start: new Date(e.start.dateTime).getTime(), end: new Date(e.end.dateTime).getTime() };
+          } else if (e.start?.date && e.end?.date) {
+            const startDateAllDayUtc = new Date(e.start.date);
+            const endDateAllDayUtc = new Date(e.end.date);
+            return { start: startDateAllDayUtc.getTime(), end: endDateAllDayUtc.getTime() };
+          }
+          return null;
+        }).filter(Boolean);
+      console.log(`INFO: Se obtuvieron ${eventsFromGoogle.length} eventos y se procesaron ${busySlots.length} busy slots del calendario para ${requestClientId}.`);
+      if (busySlots.length > 0) {
+        console.log(`DEBUG: Contenido de busySlots (eventos UTC de Google Calendar) para ${requestClientId}:`);
+        busySlots.forEach((bs, index) => {
+          const eventStartDate = new Date(bs.start);
+          const eventEndDate = new Date(bs.end);
+          if (eventEndDate > calendarQueryStartUtc && eventStartDate < calendarQueryEndUtc) { 
+            console.log(`  BusySlot ${index}: Start: ${eventStartDate.toISOString()}, End: ${eventEndDate.toISOString()}`);
+          }
+        });
+      }
 
-            console.log('✅ Respuesta generada (Calendario Simulada):', replyCalendar);
+      const WORKING_HOURS_CHILE_STR = [
+        '10:00', '10:30', '11:00', '11:30', '12:00', '12:30', '13:00', '13:30',
+        '14:00', '14:30', '15:00', '15:30', '16:00', '16:30', '17:00', '17:30',
+        '18:00', '18:30', '19:00', '19:30'
+      ];
+      const availableSlotsOutput = [];
+      const processedDaysForGenericQuery = new Set();       
+      let baseIterationDateDayUtcStart;
+      if (targetDateForDisplay) { baseIterationDateDayUtcStart = new Date(targetDateForDisplay); } 
+      else { baseIterationDateDayUtcStart = new Date(refDateForTargetCalc); }
 
-            if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: replyCalendar, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
+      // Usar effectiveConfig para DAYS_TO_QUERY_CALENDAR
+      console.log(`DEBUG: Iniciando bucle de ${effectiveConfig.calendarQueryDays} días para ${requestClientId}. Base UTC para iteración: ${baseIterationDateDayUtcStart.toISOString()}`);
+      // Usar effectiveConfig para DAYS_TO_QUERY_CALENDAR
+      for (let i = 0; i < effectiveConfig.calendarQueryDays; i++) {
+        const currentDayProcessingUtcStart = new Date(baseIterationDateDayUtcStart);
+        currentDayProcessingUtcStart.setUTCDate(baseIterationDateDayUtcStart.getUTCDate() + i);
+        const currentDayProcessingIdentifierChile = getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago');
+        console.log(`\nDEBUG: Bucle Día i=${i} para ${requestClientId}. Iterando para día UTC: ${currentDayProcessingUtcStart.toISOString()} (Corresponde al día de Chile: ${currentDayProcessingIdentifierChile})`);
+        if (targetDateIdentifierForSlotFilter) {
+             console.log(`DEBUG: comparando con targetDateIdentifierForSlotFilter para ${requestClientId}: ${targetDateIdentifierForSlotFilter}`);
+        }
 
-            return res.status(200).json({ response: replyCalendar });
+        for (const timeChileStr of WORKING_HOURS_CHILE_STR) {
+          const [hChile, mChile] = timeChileStr.split(':').map(Number);
+          let skipReason = ""; 
+          if (targetHourChile !== null) { if (hChile !== targetHourChile || mChile !== targetMinuteChile) { skipReason = "Filtro de hora específica"; }
+          } else if (timeOfDay && !isGenericNextWeekSearch && !(isAnyNextWeekIndicator && !targetDateIdentifierForSlotFilter && !isProximoWordQuery) ) { 
+            if (timeOfDay === 'morning' && (hChile < 10 || hChile >= 14)) skipReason = "Filtro franja mañana";
+            if (timeOfDay === 'afternoon' && (hChile < 14 || hChile > 19 || (hChile === 19 && mChile > 30))) skipReason = "Filtro franja tarde";
+          }
+          if (skipReason) { /*console.log(`  Slot ${timeChileStr} Chile DESCARTADO PREVIAMENTE por ${requestClientId}: ${skipReason}`);*/ continue; } // Comentado para no ser tan verboso
 
-    }
+          const slotStartUtc = convertChileTimeToUtc(currentDayProcessingUtcStart, hChile, mChile);
+          const slotDayIdentifierInChile = getDayIdentifier(slotStartUtc, 'America/Santiago');
+          // console.log(`  SLOT CANDIDATO para ${requestClientId}: ${timeChileStr} Chile. -> slotStartUtc: ${slotStartUtc.toISOString()} (Día en Chile del Slot: ${slotDayIdentifierInChile})`); // Verboso
 
+          if (isNaN(slotStartUtc.getTime())) { console.log(`    DESCARTADO para ${requestClientId}: Slot UTC inválido.`); continue; }
+          const slightlyFutureServerNowUtc = new Date(serverNowUtc.getTime() + 1 * 60 * 1000); 
+          if (slotStartUtc < slightlyFutureServerNowUtc) { /*console.log(`    DESCARTADO para ${requestClientId}: Slot es pasado (${slotStartUtc.toISOString()} < ${slightlyFutureServerNowUtc.toISOString()})`);*/ continue; } // Comentado para no ser tan verboso
 
+          if (targetDateIdentifierForSlotFilter) {
+            if (slotDayIdentifierInChile !== targetDateIdentifierForSlotFilter) {
+              // console.log(`    DESCARTADO para ${requestClientId}: Día del slot ${slotDayIdentifierInChile} NO es target ${targetDateIdentifierForSlotFilter}.`); // Verboso
+              continue; 
+            }
+            // console.log(`    FILTRO DÍA para ${requestClientId}: Día del slot ${slotDayIdentifierInChile} SÍ es target ${targetDateIdentifierForSlotFilter}.`); // Verboso
+          } // else { console.log(`    FILTRO DÍA para ${requestClientId}: No hay targetDateIdentifierForSlotFilter (búsqueda genérica para este slot).`); } // Verboso
 
-    // --- Rama de OpenAI ---
+          const slotEndUtc = new Date(slotStartUtc);
+          slotEndUtc.setUTCMinutes(slotEndUtc.getUTCMinutes() + 30);
+          const isBusy = busySlots.some(busy => slotStartUtc.getTime() < busy.end && slotEndUtc.getTime() > busy.start);
+          // console.log(`    EVALUANDO para ${requestClientId}: ${new Intl.DateTimeFormat('es-CL', {weekday: 'long', day: 'numeric', month: 'long',hour: '2-digit', minute: '2-digit', timeZone: 'America/Santiago'}).format(slotStartUtc)} - ¿Está ocupado? ${isBusy}`); // Verboso
+          
+          if (!isBusy) { 
+            const formattedSlot = new Intl.DateTimeFormat('es-CL', {weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'America/Santiago'}).format(slotStartUtc);
+            if (!targetDateIdentifierForSlotFilter && !targetHourChile) { 
+                  // Usar effectiveConfig.maxSuggestions para el límite de búsqueda genérica (aumentado un poco para variedad)
+                if (availableSlotsOutput.length < (effectiveConfig.maxSuggestions * 2 < 10 ? effectiveConfig.maxSuggestions * 2 : 10) ) { // Límite para búsqueda genérica
+                    if (!processedDaysForGenericQuery.has(slotDayIdentifierInChile) || availableSlotsOutput.length < 2) {
+                         availableSlotsOutput.push(formattedSlot); processedDaysForGenericQuery.add(slotDayIdentifierInChile); /*console.log(`      ✅ AÑADIDO (genérico, nuevo día) para ${requestClientId}: ${formattedSlot}`);*/
+                    } else if (Array.from(processedDaysForGenericQuery).length < 3 && availableSlotsOutput.filter(s => s.startsWith(new Intl.DateTimeFormat('es-CL', {weekday: 'long', day:'numeric', month:'long', timeZone: 'America/Santiago'}).format(new Date(slotStartUtc.getFullYear(), slotStartUtc.getMonth(), slotStartUtc.getDate())))).length < 2) { // Max 2 por día hasta 3 días diferentes
+                         availableSlotsOutput.push(formattedSlot); /*console.log(`      ✅ AÑADIDO (genérico, mismo día, <2) para ${requestClientId}: ${formattedSlot}`);*/
+                    } // else { console.log(`      DEBUG: NO AÑADIDO (genérico, límite de variedad) para ${requestClientId}`);}
+                } // else { console.log(`      DEBUG: NO AÑADIDO (genérico, output.length > limite) para ${requestClientId}`);}
+            } else { availableSlotsOutput.push(formattedSlot); /*console.log(`      ✅ AÑADIDO (específico) para ${requestClientId}: ${formattedSlot}`);*/ }
+          } // else { console.log(`      OCUPADO (isBusy=true) para ${requestClientId}.`);}
+        }
+        // Usar effectiveConfig para MAX_SUGGESTIONS
+        if (targetDateIdentifierForSlotFilter && getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago') === targetDateIdentifierForSlotFilter) {
+            if (targetHourChile !== null || availableSlotsOutput.length >= effectiveConfig.maxSuggestions ) break; 
+        }
+        // Usar effectiveConfig para MAX_SUGGESTIONS
+        if (availableSlotsOutput.length >= effectiveConfig.maxSuggestions && !targetDateIdentifierForSlotFilter && !targetHourChile && processedDaysForGenericQuery.size >=2) break; 
+      }
+      
+      if(targetDateIdentifierForSlotFilter) { console.log(`🔎 Slots encontrados para ${requestClientId} el día de Chile ${targetDateIdentifierForSlotFilter}: ${availableSlotsOutput.length}`); } 
+      else { console.log(`🔎 Slots encontrados para ${requestClientId} en búsqueda genérica (próximos ${effectiveConfig.calendarQueryDays} días): ${availableSlotsOutput.length}`); }
+      
+      // Formateo de respuesta (del Prototipo Dorado, adaptado para usar effectiveConfig.whatsappNumber y helpers)
+      let replyCalendar = ''; // Renombrado de 'reply' a 'replyCalendar' para evitar colisión con la variable de OpenAI
+      if (targetHourChile !== null) { 
+        if (availableSlotsOutput.length > 0) {
+          replyCalendar = `¡Excelente! 🎉 Justo el ${availableSlotsOutput[0]} está libre para ti. ¡Qué buena suerte! Para asegurar tu cita,${getWhatsappDerivationSuffix(effectiveConfig.whatsappNumber)} 😉`;
+        } else {
+          let specificTimeQuery = "";
+          if(targetDateForDisplay) specificTimeQuery += `${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} `;
+          specificTimeQuery += `a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
+          replyCalendar = `¡Uy! Justo ${specificTimeQuery} no me quedan espacios. 😕 ¿Te gustaría que revise otro horario o quizás otro día?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)}`;
+        }
+      } else if (availableSlotsOutput.length > 0) { 
+        let intro = `¡Buenas noticias! 🎉 Encontré estas horitas disponibles`;
+        if (targetDateForDisplay) {
+          if (isGenericNextWeekSearch) { // Añadido del Frankenstein para mejorar el mensaje de semana próxima
+            intro += ` para la próxima semana (comenzando el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)})`;
+          } else {
+              intro += ` para el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)}`;
+          }
+        } else if (isAnyNextWeekIndicator) { 
+            intro += ` para la próxima semana`;
+        } else { 
+             intro += ` en los próximos días`;
+        }
+        if (timeOfDay === 'morning') intro += ' por la mañana';
+        if (timeOfDay === 'afternoon') intro += ' por la tarde';
+        intro += '. ¡A ver si alguna te acomoda! 🥳:';
+        let finalSuggestions = [];
+        // Usar effectiveConfig para MAX_SUGGESTIONS
+        if (!targetDateIdentifierForSlotFilter && !targetHourChile) { 
+            const slotsByDay = {};
+            for (const slot of availableSlotsOutput) {
+                const dayKey = slot.split(',').slice(0,2).join(','); // "lunes, 26 de mayo"
+                if (!slotsByDay[dayKey]) slotsByDay[dayKey] = [];
+                if (slotsByDay[dayKey].length < 2) { slotsByDay[dayKey].push(slot); } // Max 2 sugerencias por día en búsqueda genérica
+            }
+            let count = 0;
+            const sortedDayKeys = Object.keys(slotsByDay).sort((a, b) => {
+                try { // robustecer el sort
+                    const dateA = new Date(a.split(', ')[1].replace(/ de /g, ' ') + " " + currentYearChile);
+                    const dateB = new Date(b.split(', ')[1].replace(/ de /g, ' ') + " " + currentYearChile);
+                    return dateA - dateB;
+                } catch(e) { return 0; }
+            });
+            for (const dayKey of sortedDayKeys) { 
+                for(const slot of slotsByDay[dayKey]){
+                    if(count < effectiveConfig.maxSuggestions){ finalSuggestions.push(slot); count++; } else { break; }
+                }
+                if (count >= effectiveConfig.maxSuggestions) break; 
+            }
+        } else { finalSuggestions = availableSlotsOutput.slice(0, effectiveConfig.maxSuggestions); }
+        
+        replyCalendar = `${intro}\n- ${finalSuggestions.join('\n- ')}`;
+        if (availableSlotsOutput.length > finalSuggestions.length && finalSuggestions.length > 0 && finalSuggestions.length < effectiveConfig.maxSuggestions) { 
+           const remaining = availableSlotsOutput.length - finalSuggestions.length;
+           if (remaining > 0) { replyCalendar += `\n\n(Y ${remaining} más... ¡para que tengas de dónde elegir! 😉)`; }
+        }
+        replyCalendar += `\n\nPara reservar alguna o si buscas otra opción,${getWhatsappDerivationSuffix(effectiveConfig.whatsappNumber)}`;
+      } else { 
+        replyCalendar = '¡Pucha! 😔 Parece que no tengo horas libres';
+        if (targetDateForDisplay) {
+            replyCalendar += ` para el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)}`;
+        } else if (isAnyNextWeekIndicator) { replyCalendar += ` para la próxima semana`; }
+        if (timeOfDay === 'morning') replyCalendar += ' por la mañana'; if (timeOfDay === 'afternoon') replyCalendar += ' por la tarde';
+        if (targetHourChile !== null && !targetDateForDisplay && !isAnyNextWeekIndicator) replyCalendar += ` a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`
+        if (targetDateForDisplay || timeOfDay || targetHourChile || isAnyNextWeekIndicator) { replyCalendar += '.'; } 
+        // Usar effectiveConfig para DAYS_TO_QUERY_CALENDAR
+        else { replyCalendar += ` dentro de los próximos ${effectiveConfig.calendarQueryDays} días.`; }
+        replyCalendar += ` ¿Te animas a que busquemos en otra fecha u horario?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)} ¡Seguro te podemos ayudar!`;
+      }
+      
+      console.log(`✅ Respuesta generada (Calendario) para ${requestClientId}:`, replyCalendar);
+      if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: replyCalendar, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
+      return res.status(200).json({ response: replyCalendar });
+      // =========== FIN DEL TRASPLANTE DESDE PROTOTIPO DORADO ===========
+    } 
 
-    console.log('💡 Consulta normal, usando OpenAI para', requestClientId);
-
+    // --- Rama de OpenAI (del Frankenstein, adaptada) ---
+    console.log(`💡 Consulta normal, usando OpenAI para ${requestClientId}`);
     
-
-    let finalSystemPrompt = effectiveConfig.basePrompt;
-
-    // ... (reemplazo de placeholders como lo tenías) ...
-
-    finalSystemPrompt = finalSystemPrompt.replace(/\$\{DAYS_TO_QUERY_CALENDAR\}/g, effectiveConfig.calendarQueryDays.toString());
-
-    finalSystemPrompt = finalSystemPrompt.replace(/\$\{MAX_DAYS_FOR_USER_REQUEST\}/g, effectiveConfig.calendarMaxUserRequestDays.toString());
-
-    if (effectiveConfig.whatsappNumber && effectiveConfig.whatsappNumber !== WHATSAPP_FALLBACK_PLACEHOLDER && effectiveConfig.whatsappNumber.trim() !== "") {
-
-        finalSystemPrompt = finalSystemPrompt.replace(/\$\{whatsappNumber\}/g, effectiveConfig.whatsappNumber);
-
-    } else {
-
-        finalSystemPrompt = finalSystemPrompt.replace(/\$\{whatsappNumber\}/g, "nuestro principal canal de contacto telefónico o digital");
-
-    }
-
-    finalSystemPrompt = finalSystemPrompt.replace(/\$\{pricingInfo\}/g, effectiveConfig.pricingInfo);
-
-    finalSystemPrompt = finalSystemPrompt.replace(/\$\{direccion\}/g, effectiveConfig.direccion);
-
-    finalSystemPrompt = finalSystemPrompt.replace(/\$\{horario\}/g, effectiveConfig.horario);
-
-    finalSystemPrompt = finalSystemPrompt.replace(/\$\{chiropracticVideoUrl\}/g, effectiveConfig.chiropracticVideoUrl);
-
-
-
+    // Usar effectiveConfig.basePrompt o el DEFAULT_SYSTEM_PROMPT_TEMPLATE
+    let finalSystemPrompt = effectiveConfig.basePrompt || DEFAULT_SYSTEM_PROMPT_TEMPLATE;
+    // Reemplazo de placeholders (similar al Frankenstein, pero asegurando que los valores de config sean string)
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{DAYS_TO_QUERY_CALENDAR\}/g, String(effectiveConfig.calendarQueryDays));
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{MAX_DAYS_FOR_USER_REQUEST\}/g, String(effectiveConfig.calendarMaxUserRequestDays));
+    
+    const wsNum = String(effectiveConfig.whatsappNumber || '').trim();
+    if (wsNum && wsNum !== WHATSAPP_FALLBACK_PLACEHOLDER) {
+        finalSystemPrompt = finalSystemPrompt.replace(/\$\{whatsappNumber\}/g, wsNum);
+    } else {
+        finalSystemPrompt = finalSystemPrompt.replace(/\$\{whatsappNumber\}/g, "nuestro principal canal de contacto telefónico o digital");
+    }
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{pricingInfo\}/g, String(effectiveConfig.pricingInfo));
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{direccion\}/g, String(effectiveConfig.direccion));
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{horario\}/g, String(effectiveConfig.horario));
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{chiropracticVideoUrl\}/g, String(effectiveConfig.chiropracticVideoUrl));
+    finalSystemPrompt = finalSystemPrompt.replace(/\$\{telefono\}/g, String(effectiveConfig.telefono || ""));
 
 
     console.log(`System Prompt para OpenAI (clientId: ${requestClientId}, primeros 500 chars):`, finalSystemPrompt.substring(0, 500) + "...");
 
-
-
     const chatResponse = await openai.chat.completions.create({
-
-      model: MODEL_FALLBACK,
-
+      model: MODEL_FALLBACK, // Usar MODEL_FALLBACK definido arriba
       messages: [
-
         { role: 'system', content: finalSystemPrompt },
-
         { role: 'user', content: message }
-
       ]
-
     });
-
-
 
     let gptReply = chatResponse.choices[0].message.content.trim();
-
     
-
-    console.log('✅ Respuesta generada (OpenAI):', gptReply);
-
+    console.log(`✅ Respuesta generada (OpenAI) para ${requestClientId}:`, gptReply);
     if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: gptReply, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
-
     return res.status(200).json({ response: gptReply });
 
-
-
   } catch (error) {
-
-    console.error(`❌ Error en Rigbot para clientId ${requestClientId}:`, error);
-
-    // console.error(error.stack); // Puede ser muy verboso para producción, pero útil en dev.
-
+    console.error(`❌ Error en Rigbot para clientId ${requestClientId}:`, error.message, error.stack);
     const errorForUser = 'Ocurrió un error inesperado en Rigbot. Por favor, intenta más tarde.';
-
     if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno: ${error.message}. UserMsg: ${errorForUser}`, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
-
     return res.status(500).json({ 
-
         error: errorForUser, 
-
-        details: process.env.NODE_ENV === 'development' ? error.message + (error.stack ? `\nStack: ${error.stack.substring(0,300)}...` : '') : undefined 
-
+        details: process.env.NODE_ENV === 'development' ? error.message + (error.stack ? `\nStack: ${error.stack.substring(0,500)}...` : '') : undefined 
     });
-
   }
-
 }
