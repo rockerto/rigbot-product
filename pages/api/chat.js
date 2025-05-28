@@ -22,7 +22,11 @@ const defaultConfig = {
   calendarMaxUserRequestDays: 21,
   maxSuggestions: 5,
   whatsappNumber: process.env.RIGBOT_DEFAULT_WSP || WHATSAPP_FALLBACK_PLACEHOLDER,
-
+  pricingInfo: "Nuestros precios son competitivos. Por favor, consulta al contactarnos.",
+  direccion: "Nuestra consulta está en Copiapó. Te daremos los detalles exactos al agendar.",
+  horario: "Atendemos de Lunes a Viernes, de 10:00 a 19:30.",
+  chiropracticVideoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", // Placeholder
+  telefono: "" // Placeholder
 };
 
 // --- Tus funciones de utilidad de fecha del Prototipo Antiguo ---
