@@ -237,54 +237,49 @@ export default async function handler(req, res) {
       let targetMinuteChile = 0;
       let timeOfDay = null;
       let isGenericNextWeekSearch = false;
-      let specificDateParsed = false; // Flag para la nueva lógica de parseo
+      let specificDateParsed = false;
 
       const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
-      const currentMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1; // 0-indexed
+      const currentMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1; 
       const currentDayOfMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { day: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
       const todayChile0000UtcTimestamp = Date.UTC(currentYearChile, currentMonthChile, currentDayOfMonthChile, 0 - CHILE_UTC_OFFSET_HOURS, 0, 0, 0);
       const refDateForTargetCalc = new Date(todayChile0000UtcTimestamp);
-      const actualCurrentDayOfWeekInChile = refDateForTargetCalc.getUTCDay(); // 0 (Dom) - 6 (Sab)
+      const actualCurrentDayOfWeekInChile = refDateForTargetCalc.getUTCDay(); 
       
-      // =========== NUEVA LÓGICA PARA PARSEAR "[día], [dd] de [mes]" ===========
-      // Regex: (opcional día de la semana y coma)(espacio)(día #)(espacio)(de)(espacio)(nombre del mes)
       const specificDateRegex = /(?:(\b(?:lunes|martes|mi[ée]rcoles|jueves|viernes|s[áa]bado|domingo)\b),?\s+)?(\d{1,2})(?:\s+de)?\s+(\b(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)\b)/i;
       const specificDateMatch = lowerMessage.match(specificDateRegex);
 
       if (specificDateMatch) {
           try {
               const dayNumber = parseInt(specificDateMatch[2], 10);
-              const monthName = specificDateMatch[3].toLowerCase().substring(0, 3); // Tomar las primeras 3 letras para el map
+              const monthName = specificDateMatch[3].toLowerCase().substring(0, 3); 
               const monthIndex = monthMap[monthName];
 
               if (monthIndex !== undefined && dayNumber >= 1 && dayNumber <= 31) {
                   let yearToUse = currentYearChile;
-                  // Si el mes parseado es menor al actual, o es el mismo mes pero el día ya pasó, asumir el próximo año
                   if (monthIndex < currentMonthChile || (monthIndex === currentMonthChile && dayNumber < currentDayOfMonthChile)) {
                       yearToUse = currentYearChile + 1;
                   }
                   
                   targetDateForDisplay = new Date(Date.UTC(yearToUse, monthIndex, dayNumber, 0 - CHILE_UTC_OFFSET_HOURS, 0, 0, 0));
                   
-                  // Validar si la fecha construida es válida (ej. 31 de Feb no lo es)
                   if (targetDateForDisplay.getUTCMonth() === monthIndex && targetDateForDisplay.getUTCDate() === dayNumber) {
                     specificDateParsed = true;
-                    targetHourChile = null; // Resetear hora si se parseó una fecha completa
-                    timeOfDay = null;       // Resetear franja horaria
+                    targetHourChile = null; 
+                    timeOfDay = null;       
                     isGenericNextWeekSearch = false; 
-                    console.log(`DEBUG: Fecha específica parseada: ${targetDateForDisplay.toISOString()}`);
+                    console.log(`DEBUG: Fecha específica parseada: ${targetDateForDisplay.toISOString()} para el clientId: ${requestClientId}`);
                   } else {
-                    console.warn(`DEBUG: Fecha parseada ${dayNumber}/${monthIndex}/${yearToUse} resultó en una fecha inválida, se ignora.`);
-                    targetDateForDisplay = null; // Invalid date, reset
+                    console.warn(`DEBUG: Fecha parseada ${dayNumber}/${monthName} (${monthIndex})/${yearToUse} resultó en una fecha inválida, se ignora. ClientId: ${requestClientId}`);
+                    targetDateForDisplay = null; 
                   }
               }
           } catch (e) {
-              console.error("Error parseando fecha específica:", e);
-              targetDateForDisplay = null; // Asegurar que no quede en un estado intermedio
+              console.error(`Error parseando fecha específica para ${requestClientId}:`, e);
+              targetDateForDisplay = null; 
           }
       }
-      // =======================================================================
-
+      
       const isProximoWordQuery = calendarKeywords.some(k => k.startsWith("proximo") && lowerMessage.includes(k));
       const isAnyNextWeekIndicator = calendarKeywords.some(k => k.includes("semana") && lowerMessage.includes(k));
 
@@ -294,7 +289,7 @@ export default async function handler(req, res) {
         { keyword: 'miercoles', index: 3 }, { keyword: 'miércoles', index: 3 }, { keyword: 'jueves', index: 4 }, 
         { keyword: 'viernes', index: 5 }, { keyword: 'sabado', index: 6 }, { keyword: 'sábado', index: 6 }
       ];
-      if (!specificDateParsed) { // Solo intentar parseo por keyword si no se parseó una fecha específica
+      if (!specificDateParsed) { 
         for (const dayInfo of dayKeywordsList) { if (lowerMessage.includes(dayInfo.keyword)) { specificDayKeywordIndex = dayInfo.index; break; } }
       }
       
@@ -308,27 +303,24 @@ export default async function handler(req, res) {
         let daysToAdd = specificDayKeywordIndex - actualCurrentDayOfWeekInChile;
 
         if (isProximoWordQuery) {
-            if (daysToAdd < 0) { // Día ya pasó esta semana, "próximo" claramente es la siguiente
+            if (daysToAdd < 0) { 
                 daysToAdd += 7;
             }
-            // Si "próximo" se usa y el día calculado cae en la semana actual (incluido hoy), sumar 7 para ir a la próxima semana
             if (daysToAdd < 7) { 
                 daysToAdd += 7;
             }
-        } else { // No se usó "próximo"
-            if (daysToAdd < 0) { // Día ya pasó esta semana (ej. "lunes" un miércoles)
+        } else { 
+            if (daysToAdd < 0) { 
                 daysToAdd += 7;
             }
-            // Si dice "X de la próxima semana" y X caería en esta semana
             if (isAnyNextWeekIndicator && daysToAdd < 7) {
                  daysToAdd += 7;
             } else if (daysToAdd === 0 && serverNowUtc.getUTCHours() >= (19 - CHILE_UTC_OFFSET_HOURS)) {
-                // Es para "hoy" (mismo día de la semana) pero ya es tarde
                 daysToAdd += 7;
             }
         }
         targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + daysToAdd);
-      } else if (!specificDateParsed && isAnyNextWeekIndicator) { // Ej: "la proxima semana" sin día específico
+      } else if (!specificDateParsed && isAnyNextWeekIndicator) { 
           targetDateForDisplay = new Date(refDateForTargetCalc);
           let daysUntilNextMonday = (1 - actualCurrentDayOfWeekInChile + 7) % 7;
           if (daysUntilNextMonday === 0 && !isProximoWordQuery) daysUntilNextMonday = 7; 
@@ -367,9 +359,22 @@ export default async function handler(req, res) {
        else if (targetMinuteChile >= 15 && targetMinuteChile < 30) targetMinuteChile = 0; 
        else if (targetMinuteChile > 30 && targetMinuteChile < 45) targetMinuteChile = 30; 
        else if (targetMinuteChile >= 45 && targetMinuteChile < 60) targetMinuteChile = 30;
-        console.log(`⏰ Hora objetivo (Chile) para ${requestClientId}: ${targetHourChile}:${targetMinuteChile.toString().padStart(2,'0')}`);
+        console.log(`⏰ Hora objetivo (Chile) parseada por timeMatch para ${requestClientId}: ${targetHourChile}:${targetMinuteChile.toString().padStart(2,'0')}`);
       }
-      // Solo setear timeOfDay si NO se parseó una hora específica y NO se parseó una fecha explícita (que podría tener su propia hora implícita o ninguna)
+
+      // =========== AJUSTE PARA EVITAR QUE EL NÚMERO DEL DÍA SE INTERPRETE COMO HORA ===========
+      if (specificDateParsed && targetHourChile !== null && timeMatch && !timeMatch[2] && !timeMatch[4]) {
+          // timeMatch[2] es la parte de los dos puntos (ej. :00)
+          // timeMatch[4] es la parte de am/pm/h/hr/hrs
+          // Si se parseó una fecha específica (ej. "5 de junio") y targetHourChile se estableció (ej. a 5 por el "5 de junio")
+          // pero NO se encontraron los dos puntos NI indicadores am/pm/h junto a ese número,
+          // entonces es muy probable que el número fuera el día del mes y no una hora.
+          console.log(`DEBUG: Reseteando targetHourChile (${targetHourChile}) porque probablemente vino del número del día de una fecha específica parseada. Captura original de timeMatch: ${timeMatch[0]} para el clientId: ${requestClientId}`);
+          targetHourChile = null;
+          targetMinuteChile = 0; 
+      }
+      // =====================================================================================
+
       if (targetHourChile === null && !specificDateParsed && !isAnyNextWeekIndicator && !isProximoWordQuery && !(targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') !== getDayIdentifier(refDateForTargetCalc, 'America/Santiago'))) { 
         if ((lowerMessage.includes('mañana') && !lowerMessage.includes('pasado mañana'))) {
              if (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === getDayIdentifier(new Date(refDateForTargetCalc.getTime() + 24*60*60*1000), 'America/Santiago')) {
@@ -382,7 +387,7 @@ export default async function handler(req, res) {
       }
       
       const WORKING_HOURS_CHILE_NUMERIC = [10, 10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14, 14.5, 15, 15.5, 16, 16.5, 17, 17.5, 18, 18.5, 19, 19.5];
-      if (targetHourChile !== null) {
+      if (targetHourChile !== null) { // Esta verificación ahora es más confiable después del ajuste anterior
         const requestedTimeNumeric = targetHourChile + (targetMinuteChile / 60);
         if (!WORKING_HOURS_CHILE_NUMERIC.includes(requestedTimeNumeric) || requestedTimeNumeric < 10 || requestedTimeNumeric > 19.5) {
             let replyPreamble = `¡Ojo! 👀 Parece que las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
