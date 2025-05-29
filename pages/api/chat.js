@@ -173,7 +173,6 @@ export default async function handler(req, res) {
       let calendar; 
 
       if (clientConfigData && clientConfigData.googleCalendarConnected && clientConfigData.googleCalendarTokens) {
-        // ... (Lógica de conexión al calendario del cliente y refresh token - SIN CAMBIOS) ...
         console.log(`INFO: Cliente ${requestClientId} tiene Google Calendar conectado. Email: ${clientConfigData.googleCalendarEmail || 'No disponible en config'}. Intentando usar sus tokens.`);
         try {
           const oauth2Client = new google.auth.OAuth2(
@@ -236,7 +235,7 @@ export default async function handler(req, res) {
       let targetDateIdentifierForSlotFilter = null;
       let targetHourChile = null;
       let targetMinuteChile = 0;
-      let timeOfDay = null; // 'morning' o 'afternoon'
+      let timeOfDay = null; 
       let isGenericNextWeekSearch = false;
       let specificDateParsed = false;
 
@@ -281,7 +280,7 @@ export default async function handler(req, res) {
       
       const isProximoWordQuery = calendarKeywords.some(k => k.startsWith("proximo") && lowerMessage.includes(k));
       const isAnyNextWeekIndicator = calendarKeywords.some(k => k.includes("semana") && lowerMessage.includes(k));
-      let dayKeywordFound = false;
+      let dayKeywordFound = false; // <--- Fix 2: Flag para saber si se encontró un día keyword
       let specificDayKeywordIndex = -1;
       const dayKeywordsList = [ 
         { keyword: 'domingo', index: 0 }, { keyword: 'lunes', index: 1 }, { keyword: 'martes', index: 2 }, 
@@ -299,9 +298,10 @@ export default async function handler(req, res) {
         }
       }
       
+      // ========= INICIO REESTRUCTURACIÓN PARSEO DE FECHA RELATIVA ==========
       if (specificDateParsed) {
         // Fecha ya establecida por specificDateRegex, no hacer nada más aquí para la fecha.
-      } else if (dayKeywordFound) { // Si se encontró un día de la semana explícito (ej. "viernes")
+      } else if (dayKeywordFound) { // Se encontró un día de la semana explícito (ej. "viernes")
         targetDateForDisplay = new Date(refDateForTargetCalc);
         let daysToAdd = specificDayKeywordIndex - actualCurrentDayOfWeekInChile;
         if (isProximoWordQuery) {
@@ -315,19 +315,25 @@ export default async function handler(req, res) {
         targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + daysToAdd);
       } else if (lowerMessage.includes('hoy')) { // No hay fecha específica, no hay día de semana keyword
         targetDateForDisplay = new Date(refDateForTargetCalc);
-      } else if (lowerMessage.includes('mañana') && !lowerMessage.includes('pasado mañana')) { // Cuidado con "en la mañana"
-        // Solo considerar "mañana" como día si no es parte de una frase de franja horaria ya manejada por un día específico
-        if (!lowerMessage.match(/\b(en|por)\s+la\s+mañana\b/)) {
+      } else if (lowerMessage.includes('mañana') && !lowerMessage.includes('pasado mañana')) { 
+        // Solo considerar "mañana" (día) si no es parte de una frase de franja horaria como "en la mañana"
+        // que ya debería haber sido manejada por el `dayKeywordFound` si había un día específico.
+        if (!lowerMessage.match(/\b(en|por)\s+la\s+mañana\b/i) || !dayKeywordFound) { 
             targetDateForDisplay = new Date(refDateForTargetCalc);
             targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + 1);
+        } else if (!targetDateForDisplay && dayKeywordFound) {
+            // Si se encontró un día como "viernes" y la frase era "viernes en la mañana",
+            // targetDateForDisplay ya debería estar seteado. Si no, es un caso raro.
+            console.log("DEBUG: 'mañana' (franja) detectada pero no se aplicó 'mañana' (día) porque dayKeywordFound era true y targetDateForDisplay no se seteó, o 'mañana' era parte de una frase.")
         }
-      } else if (isAnyNextWeekIndicator) { 
+      } else if (isAnyNextWeekIndicator) { // Ej: "la proxima semana" sin día específico
           targetDateForDisplay = new Date(refDateForTargetCalc);
           let daysUntilNextMonday = (1 - actualCurrentDayOfWeekInChile + 7) % 7;
           if (daysUntilNextMonday === 0 && !isProximoWordQuery) daysUntilNextMonday = 7; 
           targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + daysUntilNextMonday); 
           isGenericNextWeekSearch = true; 
       }
+      // ========= FIN REESTRUCTURACIÓN PARSEO DE FECHA RELATIVA ==========
       
       if (targetDateForDisplay) {
         console.log(`🎯 Fecha Objetivo (para mostrar y filtrar) para ${requestClientId}: ${new Intl.DateTimeFormat('es-CL', { dateStyle: 'full', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} (UTC: ${targetDateForDisplay.toISOString()})`);
@@ -347,21 +353,28 @@ export default async function handler(req, res) {
       else if (targetDateForDisplay && isGenericNextWeekSearch) { console.log(`🏷️ Búsqueda genérica para ${requestClientId} para la semana que comienza el ${getDayIdentifier(targetDateForDisplay, 'America/Santiago')}, sin filtro de día específico.`); } 
       else { console.log(`🏷️ Búsqueda genérica desde hoy para ${requestClientId}, sin filtro de día específico.`); }
       
-      // Determinar timeOfDay ANTES de timeMatch, para que no interfieran
+      // ======== LÓGICA DE timeOfDay (MAÑANA/TARDE) REFINADA ========
       if (targetHourChile === null) { // Solo si no se ha parseado una hora específica aún
-        if (lowerMessage.includes('tarde') && (lowerMessage.includes('la tarde') || lowerMessage.includes('de tarde'))) {
+        const tardePattern = /\b(tarde|de tarde|en la tarde)\b/i;
+        const mananaPattern = /\b(mañana|de mañana|en la mañana)\b/i; // "mañana" como franja horaria
+
+        if (tardePattern.test(lowerMessage)) {
             timeOfDay = 'afternoon';
-        } else if (lowerMessage.includes('mañana') && (lowerMessage.includes('la mañana') || lowerMessage.includes('de mañana'))) {
-            // Evitar que "mañana" (el día) se confunda con "mañana" (la franja horaria) si ya se parseó un día específico que no es "mañana" (el día)
-            if (!targetDateForDisplay || // Si no hay fecha objetivo aún O
-                (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === getDayIdentifier(new Date(refDateForTargetCalc.getTime() + 24*60*60*1000), 'America/Santiago')) || // O la fecha objetivo es mañana (el día)
-                (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === getDayIdentifier(refDateForTargetCalc, 'America/Santiago')) // O la fecha objetivo es hoy
-            ) {
-                 timeOfDay = 'morning';
+        } else if (mananaPattern.test(lowerMessage)) {
+            // Evitar que "mañana" (el día) se confunda con "mañana" (la franja horaria)
+            // si el día objetivo NO es mañana (el día) Y NO es hoy.
+            const isTargetToday = targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === getDayIdentifier(refDateForTargetCalc, 'America/Santiago');
+            const isTargetTomorrowDay = targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === getDayIdentifier(new Date(refDateForTargetCalc.getTime() + 24*60*60*1000), 'America/Santiago');
+            
+            if (!targetDateForDisplay || isTargetToday || isTargetTomorrowDay) {
+                timeOfDay = 'morning';
+            } else if (dayKeywordFound || specificDateParsed) { // Si se especificó un día (ej. "viernes en la mañana")
+                timeOfDay = 'morning';
             }
         }
-        if(timeOfDay) console.log(`🕒 Franja horaria ANTES de timeMatch para ${requestClientId}: ${timeOfDay}`);
+        if(timeOfDay) console.log(`🕒 Franja horaria parseada para ${requestClientId}: ${timeOfDay}`);
       }
+      // ===============================================================
 
       const timeMatch = lowerMessage.match(/(\d{1,2})\s*(:(00|30|15|45))?\s*(pm|am|h|hr|hrs)?/i);
       if (timeMatch) {
@@ -372,8 +385,6 @@ export default async function handler(req, res) {
         if (isPm && hour >= 1 && hour <= 11) hour += 12;
         if (isAm && hour === 12) hour = 0; 
         
-        // Solo setear targetHourChile si no se parseó una fecha específica que ya implicó resetear la hora
-        // O si, habiéndose parseado una fecha específica, el timeMatch tiene indicadores claros de ser una hora (am/pm, h, :xx)
         if (!specificDateParsed || (specificDateParsed && (timeMatch[2] || timeMatch[4]))) {
             targetHourChile = hour;
             targetMinuteChile = minute;
@@ -381,7 +392,7 @@ export default async function handler(req, res) {
             else if (targetMinuteChile >= 15 && targetMinuteChile < 30) targetMinuteChile = 0; 
             else if (targetMinuteChile > 30 && targetMinuteChile < 45) targetMinuteChile = 30; 
             else if (targetMinuteChile >= 45 && targetMinuteChile < 60) targetMinuteChile = 30;
-            timeOfDay = null; // Si se parsea una hora específica, anula la franja genérica
+            timeOfDay = null; 
             console.log(`⏰ Hora objetivo (Chile) parseada por timeMatch para ${requestClientId}: ${targetHourChile}:${targetMinuteChile.toString().padStart(2,'0')}`);
         } else if (specificDateParsed) {
             console.log(`DEBUG: timeMatch capturó un número (${timeMatch[1]}) pero se ignoró porque specificDateParsed era true y no había indicadores claros de hora (am/pm, h, :xx). ClientId: ${requestClientId}`);
@@ -393,8 +404,10 @@ export default async function handler(req, res) {
           targetHourChile = null;
           targetMinuteChile = 0; 
           // Re-evaluar timeOfDay si la hora se reseteó
-          if (lowerMessage.includes('tarde') && (lowerMessage.includes('la tarde') || lowerMessage.includes('de tarde'))) timeOfDay = 'afternoon';
-          else if (lowerMessage.includes('mañana') && (lowerMessage.includes('la mañana') || lowerMessage.includes('de mañana'))) timeOfDay = 'morning';
+          const tardePattern = /\b(tarde|de tarde|en la tarde)\b/i;
+          const mananaPattern = /\b(mañana|de mañana|en la mañana)\b/i;
+          if (tardePattern.test(lowerMessage)) timeOfDay = 'afternoon';
+          else if (mananaPattern.test(lowerMessage)) timeOfDay = 'morning'; // Podría necesitar más refinamiento aquí
           if(timeOfDay) console.log(`🕒 Franja horaria RE-EVALUADA para ${requestClientId}: ${timeOfDay}`);
       }
       
@@ -415,7 +428,26 @@ export default async function handler(req, res) {
 
       let calendarQueryStartUtc;
       if (targetDateForDisplay) { calendarQueryStartUtc = new Date(targetDateForDisplay.getTime());} 
-      else { calendarQueryStartUtc = new Date(refDateForTargetCalc.getTime()); }
+      else { calendarQueryStartUtc = new Date(refDateForTargetCalc.getTime()); } // Default to today if no date parsed
+      
+      // Asegurar que calendarQueryStartUtc no sea una fecha pasada si targetDateForDisplay era null y hoy ya es tarde
+      if (!targetDateForDisplay && calendarQueryStartUtc < serverNowUtc && 
+          getDayIdentifier(calendarQueryStartUtc, 'America/Santiago') === getDayIdentifier(serverNowUtc, 'America/Santiago')) {
+            // Si la query es para hoy pero ya pasó el día o es muy tarde para ver slots de hoy, avanzar al día siguiente.
+            // Esto es para búsquedas genéricas sin fecha.
+            const tempTomorrow = new Date(refDateForTargetCalc);
+            tempTomorrow.setUTCDate(tempTomorrow.getUTCDate() + 1);
+            if (calendarQueryStartUtc < serverNowUtc ) { // Si aún no se ha avanzado o es una hora muy temprana del día
+                 // Si la hora actual ya pasó la última hora de trabajo, o es muy tarde.
+                 const currentChileHour = parseInt(new Intl.DateTimeFormat('en-US', {hour:'2-digit', hour12: false, timeZone:'America/Santiago'}).format(serverNowUtc));
+                 if (currentChileHour >= 19) { // Si ya son las 7pm o más
+                    console.log("DEBUG: Query genérica para hoy pero es tarde, iniciando búsqueda desde mañana.")
+                    calendarQueryStartUtc = tempTomorrow;
+                 }
+            }
+      }
+
+
       const calendarQueryEndUtc = new Date(calendarQueryStartUtc);
       calendarQueryEndUtc.setUTCDate(calendarQueryStartUtc.getUTCDate() + effectiveConfig.calendarQueryDays); 
       console.log(`🗓️ Google Calendar Query para ${requestClientId} (Calendario: ${clientConfigData?.googleCalendarConnected && clientConfigData.googleCalendarEmail ? clientConfigData.googleCalendarEmail : (clientConfigData?.googleCalendarConnected ? 'Cliente (email no obtenido)' : 'Default')}): De ${calendarQueryStartUtc.toISOString()} a ${calendarQueryEndUtc.toISOString()}`);
@@ -432,7 +464,6 @@ export default async function handler(req, res) {
         });
         console.log(`DEBUG: Llamada a calendar.events.list completada para ${requestClientId}.`);
       } catch (googleError) {
-        // ... (Manejo de error de Google Calendar - SIN CAMBIOS) ...
         console.error(`❌ ERROR DIRECTO en calendar.events.list para ${requestClientId}:`, googleError);
         if (googleError.code === 401 || (googleError.errors && googleError.errors.some(e => e.reason === 'authError'))) {
             console.warn(`WARN: Error de autenticación al leer calendario de ${requestClientId}. Desconectando su calendario.`);
@@ -455,40 +486,58 @@ export default async function handler(req, res) {
           return null; 
         }).filter(Boolean); 
       console.log(`INFO: Se obtuvieron ${eventsFromGoogle.length} eventos y se procesaron ${busySlots.length} busy slots (ignorando all-day) del calendario para ${requestClientId}.`);
-      // ... (Logging de busySlots - SIN CAMBIOS)
+      if (busySlots.length > 0 && process.env.NODE_ENV === 'development') { // Loguear busy slots solo en desarrollo
+        console.log(`DEBUG: Contenido de busySlots (eventos UTC de Google Calendar) para ${requestClientId}:`);
+        busySlots.forEach((bs, index) => {
+          const eventStartDate = new Date(bs.start);
+          const eventEndDate = new Date(bs.end);
+          if (eventEndDate > calendarQueryStartUtc && eventStartDate < calendarQueryEndUtc) { 
+            console.log(`  BusySlot ${index}: Start: ${eventStartDate.toISOString()}, End: ${eventEndDate.toISOString()}`);
+          }
+        });
+      }
 
       const WORKING_HOURS_CHILE_STR = [
         '10:00', '10:30', '11:00', '11:30', '12:00', '12:30', '13:00', '13:30',
         '14:00', '14:30', '15:00', '15:30', '16:00', '16:30', '17:00', '17:30',
         '18:00', '18:30', '19:00', '19:30'
       ];
-      const availableSlotsOutput = [];
+      const availableSlotsOutput = []; // Va a contener todos los slots libres del día/rango filtrado por timeOfDay
       const processedDaysForGenericQuery = new Set();       
       let baseIterationDateDayUtcStart;
-      if (targetDateForDisplay) { baseIterationDateDayUtcStart = new Date(targetDateForDisplay); } 
-      else { baseIterationDateDayUtcStart = new Date(refDateForTargetCalc); }
+
+      // Si targetDateForDisplay está definido (ej. "mañana", "lunes", "5 de junio"), usarlo como base.
+      // Si no, la búsqueda es genérica desde hoy (o mañana si hoy es tarde). calendarQueryStartUtc ya tiene esta lógica.
+      if (targetDateForDisplay) { 
+          baseIterationDateDayUtcStart = new Date(targetDateForDisplay); 
+      } else { 
+          baseIterationDateDayUtcStart = new Date(calendarQueryStartUtc); // calendarQueryStartUtc ya considera si hoy es tarde para búsquedas genéricas.
+      }
+
 
       console.log(`DEBUG: Iniciando bucle de ${effectiveConfig.calendarQueryDays} días para ${requestClientId}. Base UTC para iteración: ${baseIterationDateDayUtcStart.toISOString()}`);
       for (let i = 0; i < effectiveConfig.calendarQueryDays; i++) {
         const currentDayProcessingUtcStart = new Date(baseIterationDateDayUtcStart);
         currentDayProcessingUtcStart.setUTCDate(baseIterationDateDayUtcStart.getUTCDate() + i);
         const currentDayProcessingIdentifierChile = getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago');
-        console.log(`\nDEBUG: Bucle Día i=${i} para ${requestClientId}. Iterando para día UTC: ${currentDayProcessingUtcStart.toISOString()} (Corresponde al día de Chile: ${currentDayProcessingIdentifierChile})`);
-        if (targetDateIdentifierForSlotFilter) {
-             console.log(`DEBUG: comparando con targetDateIdentifierForSlotFilter para ${requestClientId}: ${targetDateIdentifierForSlotFilter}`);
-        }
+        if (process.env.NODE_ENV === 'development') {
+           console.log(`\nDEBUG: Bucle Día i=${i} para ${requestClientId}. Iterando para día UTC: ${currentDayProcessingUtcStart.toISOString()} (Corresponde al día de Chile: ${currentDayProcessingIdentifierChile})`);
+            if (targetDateIdentifierForSlotFilter) {
+                 console.log(`DEBUG: comparando con targetDateIdentifierForSlotFilter para ${requestClientId}: ${targetDateIdentifierForSlotFilter}`);
+            }
+        }
 
         for (const timeChileStr of WORKING_HOURS_CHILE_STR) {
           const [hChile, mChile] = timeChileStr.split(':').map(Number);
           let skipReason = ""; 
-          // MODIFICADO: Aplicación del filtro timeOfDay
-          if (targetHourChile !== null) { // Si se pidió hora específica, ese es el filtro principal
+          // Aplicar filtro de hora específica si existe, sino, aplicar filtro de franja horaria si existe
+          if (targetHourChile !== null) { 
               if (hChile !== targetHourChile || mChile !== targetMinuteChile) { skipReason = "Filtro de hora específica"; }
-          } else if (timeOfDay) { // Si no hay hora específica, pero sí franja (mañana/tarde)
+          } else if (timeOfDay) { 
             if (timeOfDay === 'morning' && (hChile < 10 || hChile >= 14)) skipReason = "Filtro franja mañana";
             if (timeOfDay === 'afternoon' && (hChile < 14 || hChile > 19 || (hChile === 19 && mChile > 30))) skipReason = "Filtro franja tarde";
           }
-          if (skipReason) { /* console.log(`Skipping ${timeChileStr} due to ${skipReason}`) */ continue; }
+          if (skipReason) { continue; }
 
           const slotStartUtc = convertChileTimeToUtc(currentDayProcessingUtcStart, hChile, mChile);
           const slotDayIdentifierInChile = getDayIdentifier(slotStartUtc, 'America/Santiago');
@@ -496,9 +545,9 @@ export default async function handler(req, res) {
           const slightlyFutureServerNowUtc = new Date(serverNowUtc.getTime() + 1 * 60 * 1000); 
           if (slotStartUtc < slightlyFutureServerNowUtc) { continue; } 
 
-          if (targetDateIdentifierForSlotFilter) { // Si se busca un día específico
+          if (targetDateIdentifierForSlotFilter) { 
             if (slotDayIdentifierInChile !== targetDateIdentifierForSlotFilter) {
-              continue; // Solo procesar slots del día objetivo
+              continue; 
             }
           }
           const slotEndUtc = new Date(slotStartUtc);
@@ -507,117 +556,54 @@ export default async function handler(req, res) {
           
           if (!isBusy) { 
             const formattedSlot = new Intl.DateTimeFormat('es-CL', {weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'America/Santiago'}).format(slotStartUtc);
-            // MODIFICADO: Lógica para añadir a availableSlotsOutput cuando se pide hora específica
-            if (targetHourChile !== null) {
-                // Si se pidió hora específica, solo añadir ESE slot si es el que se está evaluando
-                if (hChile === targetHourChile && mChile === targetMinuteChile) {
-                    availableSlotsOutput.push(formattedSlot);
-                }
-            } else { // Si no se pidió hora específica (búsqueda general o por franja)
-                if (!targetDateIdentifierForSlotFilter && !targetHourChile) { // Búsqueda completamente genérica (ni día, ni hora)
-                    if (availableSlotsOutput.length < (effectiveConfig.maxSuggestions * 2 < 10 ? effectiveConfig.maxSuggestions * 2 : 10) ) { 
-                        if (!processedDaysForGenericQuery.has(slotDayIdentifierInChile) || availableSlotsOutput.length < 2) {
-                             availableSlotsOutput.push(formattedSlot); processedDaysForGenericQuery.add(slotDayIdentifierInChile); 
-                        } else if (Array.from(processedDaysForGenericQuery).length < 3 && availableSlotsOutput.filter(s => s.startsWith(new Intl.DateTimeFormat('es-CL', {weekday: 'long', day:'numeric', month:'long', timeZone: 'America/Santiago'}).format(new Date(slotStartUtc.getFullYear(), slotStartUtc.getMonth(), slotStartUtc.getDate())))).length < 2) { 
-                             availableSlotsOutput.push(formattedSlot); 
-                        } 
-                    } 
-                } else { // Búsqueda para un día específico (o franja en un día específico), pero sin hora concreta
-                    availableSlotsOutput.push(formattedSlot); 
-                }
-            }
+            availableSlotsOutput.push(formattedSlot); // Añadir todos los slots libres que pasen los filtros
           } 
         } // Fin del bucle de WORKING_HOURS_CHILE_STR
-
-        // MODIFICADO: Lógica de corte del bucle de días
         if (targetDateIdentifierForSlotFilter && getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago') === targetDateIdentifierForSlotFilter) {
-            // Si se buscó un día específico (y ya lo procesamos) Y:
-            // 1. Se buscó una hora específica (targetHourChile !== null), entonces ya tenemos el resultado (esté o no disponible).
-            // 2. O, si no se buscó hora específica pero ya tenemos suficientes sugerencias para ESE DÍA.
-            if (targetHourChile !== null || availableSlotsOutput.length >= effectiveConfig.maxSuggestions ) break; 
+            if (availableSlotsOutput.length >= effectiveConfig.maxSuggestions && !targetHourChile ) break; // Si es búsqueda de día específico (no hora específica) y ya tenemos suficientes
+            if (targetHourChile !== null && availableSlotsOutput.length >= 1) break; // Si es hora específica y ya la encontramos (o no)
         }
-        // Para búsqueda genérica (sin día ni hora específica), cortar si ya tenemos suficientes sugerencias de varios días
         if (availableSlotsOutput.length >= effectiveConfig.maxSuggestions && !targetDateIdentifierForSlotFilter && !targetHourChile && processedDaysForGenericQuery.size >=2) break; 
       } // Fin del bucle de días (i)
       
       if(targetDateIdentifierForSlotFilter) { console.log(`🔎 Slots encontrados para ${requestClientId} el día de Chile ${targetDateIdentifierForSlotFilter}: ${availableSlotsOutput.length}`); } 
       else { console.log(`🔎 Slots encontrados para ${requestClientId} en búsqueda genérica (próximos ${effectiveConfig.calendarQueryDays} días): ${availableSlotsOutput.length}`); }
       
-      // =========== LÓGICA DE RESPUESTA REFACTORIZADA ===========
       let replyCalendar = ''; 
       if (targetHourChile !== null) { // Usuario pidió una HORA ESPECÍFICA
-        const requestedTimeNumeric = targetHourChile + (targetMinuteChile / 60); // Para mensajes, no para lógica de calendar
-        // El formato del slot solicitado, para buscar en availableSlotsOutput o para el mensaje de "no disponible"
         let specificTimeQueryFormattedForMsg = "";
-        if(targetDateForDisplay) {
-            specificTimeQueryFormattedForMsg += `${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)} `;
-        } else { // Si no hay targetDateForDisplay (ej. "a las 5 hoy"), usar refDateForTargetCalc
-            specificTimeQueryFormattedForMsg += `${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(refDateForTargetCalc)} `;
-        }
+        const displayDateForMsg = targetDateForDisplay || refDateForTargetCalc; // Usar la fecha que se usó para la búsqueda
+        specificTimeQueryFormattedForMsg += `${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(displayDateForMsg)} `;
         specificTimeQueryFormattedForMsg += `a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
 
-        if (availableSlotsOutput.length > 0 && availableSlotsOutput[0].includes(targetHourChile.toString().padStart(2, '0') + ":" + targetMinuteChile.toString().padStart(2, '0'))) { 
-            // Se pidió hora específica Y availableSlotsOutput tiene ESE slot
-          replyCalendar = `¡Excelente! 🎉 Justo el ${availableSlotsOutput[0]} está libre para ti.${getWhatsappDerivationSuffix(effectiveConfig.whatsappNumber)} 😉`;
-        } else { // La hora específica solicitada NO está disponible
-            // ¿Hay OTROS slots disponibles para ESE MISMO DÍA?
+        const requestedSlotExactMatch = availableSlotsOutput.find(slot => slot.includes(targetHourChile.toString().padStart(2, '0') + ":" + targetMinuteChile.toString().padStart(2, '0')));
+
+        if (requestedSlotExactMatch) { 
+          replyCalendar = `¡Excelente! 🎉 Justo el ${requestedSlotExactMatch} está libre para ti.${getWhatsappDerivationSuffix(effectiveConfig.whatsappNumber)} 😉`;
+        } else { 
+            // La hora específica NO está disponible. Ofrecer alternativas para el MISMO DÍA si las hay.
+            // availableSlotsOutput ya contiene todos los slots libres del día (si targetDateIdentifierForSlotFilter estaba seteado)
+            // o del rango si la búsqueda fue más genérica pero se especificó hora.
+            // Filtramos availableSlotsOutput para que solo muestre los del día de targetDateForDisplay
             let alternativesForTheDay = [];
-            if (targetDateForDisplay) { // Solo ofrecer alternativas si se especificó un día
-                const baseDayForAlternatives = getDayIdentifier(targetDateForDisplay, 'America/Santiago');
-                // Necesitamos regenerar availableSlotsOutput SIN el filtro de targetHourChile para este día.
-                // Esto es complejo. Por ahora, si la hora específica no está, diremos que no.
-                // Para V1.x, podemos simplificar y no buscar alternativas si la hora específica no está.
-                // O, si availableSlotsOutput (antes del filtrado estricto por hora) tenía otros slots para ESE DÍA.
-                // Esto requiere que availableSlotsOutput se popule de forma más general primero.
-                // Reconsiderando: availableSlotsOutput ya tiene todos los slots libres del día (o rango).
-                // Si la hora específica no está, pero hay otros, ¿cómo los mostramos?
-                // Por ahora, nos enfocamos en la lógica del Prototipo Dorado, que es más simple aquí.
-                // Si availableSlotsOutput está vacío aquí significa que la hora específica no se encontró
-                // o que el día entero no tuvo slots (si el bucle se modificó mucho).
-
-                // Lógica simplificada: si targetHourChile no está en availableSlotsOutput, es que no estaba.
-                // Ahora busquemos alternativas EN EL MISMO DÍA si targetDateForDisplay está definido.
-                const tempAlternativeSlots = [];
-                if (targetDateForDisplay) {
-                    for (let i = 0; i < effectiveConfig.calendarQueryDays; i++) {
-                        const currentDayProcessingUtcStart = new Date(targetDateForDisplay); // Iterar solo sobre el día solicitado
-                        currentDayProcessingUtcStart.setUTCDate(targetDateForDisplay.getUTCDate() + i);
-                        if (i > 0 && !isGenericNextWeekSearch && targetDateIdentifierForSlotFilter) break; // Solo el día target si es específico
-
-                        const currentDayChile = getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago');
-                        if (targetDateIdentifierForSlotFilter && currentDayChile !== targetDateIdentifierForSlotFilter) continue;
-
-                        for (const timeChileStr of WORKING_HOURS_CHILE_STR) {
-                            const [hC, mC] = timeChileStr.split(':').map(Number);
-                            // NO aplicar filtro de targetHourChile aquí, porque buscamos alternativas
-                            if (timeOfDay) { // Aplicar filtro de franja si existe
-                                if (timeOfDay === 'morning' && (hC < 10 || hC >= 14)) continue;
-                                if (timeOfDay === 'afternoon' && (hC < 14 || hC > 19 || (hC === 19 && mC > 30))) continue;
-                            }
-                            const slotStartUtcAlt = convertChileTimeToUtc(currentDayProcessingUtcStart, hC, mC);
-                            if (slotStartUtcAlt < slightlyFutureServerNowUtc) continue;
-                            const slotEndUtcAlt = new Date(slotStartUtcAlt);
-                            slotEndUtcAlt.setUTCMinutes(slotEndUtcAlt.getUTCMinutes() + 30);
-                            const isBusyAlt = busySlots.some(busy => slotStartUtcAlt.getTime() < busy.end && slotEndUtcAlt.getTime() > busy.start);
-                            if (!isBusyAlt) {
-                                tempAlternativeSlots.push(new Intl.DateTimeFormat('es-CL', {weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'America/Santiago'}).format(slotStartUtcAlt));
-                            }
-                            if (tempAlternativeSlots.length >= effectiveConfig.maxSuggestions) break;
-                        }
-                        if (tempAlternativeSlots.length >= effectiveConfig.maxSuggestions || (targetDateIdentifierForSlotFilter && currentDayChile === targetDateIdentifierForSlotFilter)) break;
-                    }
-                }
-                
+            if (targetDateForDisplay) {
+                const targetDayStrForFiltering = new Intl.DateTimeFormat('es-CL', {weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago'}).format(targetDateForDisplay);
+                alternativesForTheDay = availableSlotsOutput.filter(slot => slot.startsWith(targetDayStrForFiltering) && slot !== requestedSlotExactMatch); // Excluir el mismo slot si por error estuviera
+            } else { // Si no hay targetDateForDisplay, no podemos ofrecer alternativas "para ese día"
+                alternativesForTheDay = availableSlotsOutput.slice(0, effectiveConfig.maxSuggestions); // Ofrecer lo que haya
+            }
+            
           replyCalendar = `¡Uy! Justo ${specificTimeQueryFormattedForMsg} no me quedan espacios. 😕`;
-                if (tempAlternativeSlots.length > 0) {
-                    replyCalendar += ` Pero para el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay || refDateForTargetCalc)} tengo estas otras opciones:\n- ${tempAlternativeSlots.slice(0, effectiveConfig.maxSuggestions).join('\n- ')}`;
-                } else if (targetDateForDisplay){
-                    replyCalendar += ` Y no encuentro más horarios para ese día.`;
-                }
-                replyCalendar += ` ¿Te gustaría que revise otro horario o quizás otro día?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)}`;
+            if (alternativesForTheDay.length > 0) {
+                replyCalendar += ` Pero para el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay || refDateForTargetCalc)} tengo estas otras opciones:\n- ${alternativesForTheDay.slice(0, effectiveConfig.maxSuggestions).join('\n- ')}`;
+            } else if (targetDateForDisplay){
+                replyCalendar += ` Y no encuentro más horarios disponibles para ese día.`;
+            }
+            replyCalendar += ` ¿Te gustaría que revise otro horario o quizás otro día?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)}`;
         }
       } else if (availableSlotsOutput.length > 0) { // Búsqueda general (sin hora específica) Y SÍ se encontraron slots
         let intro = `¡Buenas noticias! 🎉 Encontré estas horitas disponibles`;
+        // ... (lógica de intro y finalSuggestions SIN CAMBIOS respecto a la versión anterior) ...
         if (targetDateForDisplay) {
           if (isGenericNextWeekSearch) { 
             intro += ` para la próxima semana (comenzando el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)})`;
@@ -634,13 +620,16 @@ export default async function handler(req, res) {
         intro += '. ¡A ver si alguna te acomoda! 🥳:';
         
         let finalSuggestions = [];
-        // Aplicar el filtrado para búsqueda genérica de availableSlotsOutput
-        // Esta lógica ya estaba en el prototipo dorado y es para cuando NO se pide targetHourChile
         const slotsByDay = {};
         for (const slot of availableSlotsOutput) {
             const dayKey = slot.split(',').slice(0,2).join(','); 
             if (!slotsByDay[dayKey]) slotsByDay[dayKey] = [];
-            if (slotsByDay[dayKey].length < 2) { slotsByDay[dayKey].push(slot); } 
+            // Para búsqueda general, mostrar variedad. Si es para un día específico (targetDateIdentifierForSlotFilter está seteado), no limitar a 2.
+            if (!targetDateIdentifierForSlotFilter || slotsByDay[dayKey].length < effectiveConfig.maxSuggestions) { // Mostrar hasta maxSuggestions si es un día específico
+                 if (targetDateIdentifierForSlotFilter || slotsByDay[dayKey].length < 2) { // Limitar a 2 por día si es búsqueda muy genérica
+                    slotsByDay[dayKey].push(slot); 
+                 }
+            }
         }
         let count = 0;
         const sortedDayKeys = Object.keys(slotsByDay).sort((a, b) => {
@@ -656,9 +645,6 @@ export default async function handler(req, res) {
             }
             if (count >= effectiveConfig.maxSuggestions) break; 
         }
-        // Si después de la lógica de filtrado de "varios días", finalSuggestions está vacía
-        // pero availableSlotsOutput no lo estaba, tomar directamente de availableSlotsOutput.
-        // Esto puede pasar si todos los slots eran del mismo día y la lógica de "variedad" los filtró.
         if (finalSuggestions.length === 0 && availableSlotsOutput.length > 0) {
             finalSuggestions = availableSlotsOutput.slice(0, effectiveConfig.maxSuggestions);
         }
@@ -670,7 +656,7 @@ export default async function handler(req, res) {
                if (remaining > 0) { replyCalendar += `\n\n(Y ${remaining} más... ¡para que tengas de dónde elegir! 😉)`; }
             }
             replyCalendar += `\n\nPara reservar alguna o si buscas otra opción,${getWhatsappDerivationSuffix(effectiveConfig.whatsappNumber)}`;
-        } else { // availableSlotsOutput tenía datos pero el filtro de variedad no dejó nada
+        } else { 
              replyCalendar = '¡Pucha! 😔 Parece que no tengo horas libres';
             if (targetDateForDisplay) {
                 replyCalendar += ` para el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)}`;
@@ -678,7 +664,7 @@ export default async function handler(req, res) {
             if (timeOfDay === 'morning') replyCalendar += ' por la mañana'; if (timeOfDay === 'afternoon') replyCalendar += ' por la tarde';
             replyCalendar += `. ¿Te animas a que busquemos en otra fecha u horario?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)} ¡Seguro te podemos ayudar!`;
         }
-      } else { // Búsqueda general Y NO se encontraron slots en availableSlotsOutput
+      } else { 
         replyCalendar = '¡Pucha! 😔 Parece que no tengo horas libres';
         if (targetDateForDisplay) {
             replyCalendar += ` para el ${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(targetDateForDisplay)}`;
@@ -695,7 +681,6 @@ export default async function handler(req, res) {
       return res.status(200).json({ response: replyCalendar });
     } 
 
-    // ... (Rama de OpenAI - SIN CAMBIOS) ...
     console.log(`💡 Consulta normal, usando OpenAI para ${requestClientId}`);
     
     let finalSystemPrompt = effectiveConfig.basePrompt || DEFAULT_SYSTEM_PROMPT_TEMPLATE;
