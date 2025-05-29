@@ -7,21 +7,22 @@ import { isCalendarQuery, parseDateTimeQuery } from '@/lib/chat_modules/date_tim
 import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator.js';
 import { buildCalendarResponse } from '@/lib/chat_modules/response_builder.js';
 import { getOpenAIReply } from '@/lib/chat_modules/openai_handler.js';
-import { logRigbotMessage } from "@/lib/rigbotLog.js";
-import { db } from '@/lib/firebase-admin.js'; // db es usado por calendar_client_provider
+import { logRigbotMessage } from "@/lib/rigbotLog"; 
+import { db } from '@/lib/firebase-admin'; // db es usado por algunos módulos, pero el import aquí es por si acaso o si se usa directamente.
 
 export default async function handler(req, res) {
-  const validationResult = await validateRequest(req, res); // logRigbotMessage ya se llama dentro para user message
+  const validationResult = await validateRequest(req, res); 
   if (validationResult.handled) {
     return; 
   }
 
-  const { clientConfigData, requestData } = validationResult;
+  // Desestructurar con cuidado para evitar 'undefined' si validationResult.clientConfigData es null (aunque no debería serlo si handled es false)
+  const clientConfigData = validationResult.clientConfigData || {}; 
+  const requestData = validationResult.requestData || {};
   const { message, sessionId: currentSessionId, clientId: requestClientId, ipAddress } = requestData;
 
-  const effectiveConfig = getEffectiveConfig(clientConfigData);
+  const effectiveConfig = getEffectiveConfig(clientConfigData); 
   console.log("🧠 Configuración efectiva usada (orquestador) para clientId", requestClientId, ":", JSON.stringify(effectiveConfig, null, 2).substring(0, 300) + "...");
-
 
   try {
     const lowerMessage = message.toLowerCase();
@@ -29,21 +30,16 @@ export default async function handler(req, res) {
     if (isCalendarQuery(lowerMessage)) {
       const serverNowUtc = new Date();
       const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
-      //const currentMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1;
-      //const currentDayOfMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { day: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
-      //const todayChile0000UtcTimestamp = Date.UTC(currentYearChile, currentMonthChile, currentDayOfMonthChile, 0 - CHILE_UTC_OFFSET_HOURS, 0, 0, 0);
-      // refDateForTargetCalc se crea dentro de parseDateTimeQuery ahora, pero necesitamos CHILE_UTC_OFFSET_HOURS y las funciones de fecha
       
-      // Inicializar refDateForTargetCalc aquí para que esté disponible globalmente en este handler si es necesario
       const currentMonthForRef = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1;
       const currentDayForRef = parseInt(new Intl.DateTimeFormat('en-US', { day: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
+      // CHILE_UTC_OFFSET_HOURS debe ser importado o definido aquí si se usa directamente
       const refDateTimestamp = Date.UTC(currentYearChile, currentMonthForRef, currentDayForRef, 0 - CHILE_UTC_OFFSET_HOURS, 0, 0, 0);
       const refDateForTargetCalc = new Date(refDateTimestamp);
 
-
       const queryDetails = parseDateTimeQuery(lowerMessage, effectiveConfig, serverNowUtc, refDateForTargetCalc, requestClientId);
 
-      if (queryDetails.earlyResponse) { // Manejar respuestas tempranas de parseDateTimeQuery (fecha lejana, fuera de horario)
+      if (queryDetails.earlyResponse) { 
         if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: queryDetails.earlyResponse.response, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch (e) { console.error("Log Error (earlyResponse):", e) } }
         return res.status(queryDetails.earlyResponse.status).json({ response: queryDetails.earlyResponse.response });
       }
@@ -78,11 +74,11 @@ export default async function handler(req, res) {
       try {
           busySlots = await fetchBusySlots(calendar, calendarQueryStartUtc.toISOString(), calendarQueryEndUtc.toISOString(), requestClientId);
       } catch (googleError) {
-          console.error(`❌ ERROR en fetchBusySlots (orquestador) para ${requestClientId}:`, googleError);
-          // Si es un error de autenticación con el token del usuario, el provider ya lo manejó (desconectó).
-          // Aquí solo devolvemos un error genérico al usuario.
+          console.error(`❌ ERROR en fetchBusySlots (orquestador) para ${requestClientId}:`, googleError.message);
           const errorResponsePayload = { error: 'Error al consultar el calendario de Google.', details: googleError.message };
           if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno calendario: ${errorResponsePayload.error} Detalles: ${errorResponsePayload.details}`, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId });} catch(e){console.error("Log Error (fetchBusySlots catch):",e)} }
+          // Si googleError.code es 401, calendar_client_provider ya debería haber intentado invalidar los tokens.
+          // Aquí simplemente devolvemos el error al usuario.
           return res.status(500).json(errorResponsePayload);
       }
       
@@ -91,7 +87,7 @@ export default async function handler(req, res) {
           queryDetails, 
           effectiveConfig, 
           serverNowUtc, 
-          refDateForTargetCalc, // Pasando refDateForTargetCalc
+          refDateForTargetCalc, 
           calendarQueryStartUtc, 
           requestClientId
       );
@@ -110,7 +106,7 @@ export default async function handler(req, res) {
       if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: replyCalendar, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch (e) { console.error("Log Error (calendar reply):", e) } }
       return res.status(200).json({ response: replyCalendar });
 
-    } else { // No es consulta de calendario
+    } else { 
       const gptReply = await getOpenAIReply(message, effectiveConfig, requestClientId);
       if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: gptReply, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch (e) { console.error("Log Error (OpenAI reply):", e) } }
       return res.status(200).json({ response: gptReply });
