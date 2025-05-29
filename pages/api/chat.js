@@ -320,8 +320,9 @@ export default async function handler(req, res) {
         if (isJustTomorrowDayQuery || !dayKeywordFound) { 
             targetDateForDisplay = new Date(refDateForTargetCalc);
             targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + 1);
-        } else {
-            console.log("DEBUG: 'mañana' (palabra) presente pero no se usó para día por `dayKeywordFound` o no era standalone.")
+        } else if (dayKeywordFound && targetDateForDisplay === null) { // Si había un día (ej. viernes) y se dijo "en la mañana", targetDateForDisplay ya debería estar seteado a viernes.
+            // Si no se seteó, algo raro pasó, default a mañana podría ser incorrecto.
+             console.log("DEBUG: 'mañana' (palabra) presente pero targetDateForDisplay no se seteó y dayKeywordFound era true. Revisar lógica.");
         }
       } else if (isAnyNextWeekIndicator) { 
           targetDateForDisplay = new Date(refDateForTargetCalc);
@@ -493,9 +494,11 @@ export default async function handler(req, res) {
         const currentDayProcessingIdentifierChile = getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago');
         
         const isCurrentDayTomorrow = currentDayProcessingIdentifierChile === TOMORROW_DATE_IDENTIFIER_CHILE;
-        const isDebuggingThisSpecificQuery = (targetHourChile === 15 && targetMinuteChile === 0 && isCurrentDayTomorrow);
+        // Variable para saber si estamos debuggeando EL slot problemático (Jueves 3pm)
+        let isDebuggingThisSpecificSlotIteration = false; 
 
-        if (isDebuggingThisSpecificQuery) {
+        if (targetHourChile === 15 && targetMinuteChile === 0 && isCurrentDayTomorrow) {
+            isDebuggingThisSpecificSlotIteration = true; // Activa logs especiales para Jueves 3pm
             console.log(`\n🔍 DEBUGGING "MAÑANA JUEVES 3PM" SLOT PROCESSING (ClientId: ${requestClientId}):`);
             console.log(`   Current Day (Chile): ${currentDayProcessingIdentifierChile}, Slot Time (Chile) being checked: 15:00`);
             console.log(`   User's Target Hour/Minute (Chile): ${targetHourChile}:${targetMinuteChile}`);
@@ -516,14 +519,14 @@ export default async function handler(req, res) {
             if (timeOfDay === 'afternoon' && (hChile < 14 || hChile > 19 || (hChile === 19 && mChile > 30))) skipReason = "Filtro franja tarde";
           }
           
-          const isCurrentSlotTheSpecificDebugHour = (isDebuggingThisSpecificQuery && hChile === 15 && mChile === 0);
-          if (skipReason && !isCurrentSlotTheSpecificDebugHour ) { continue; } 
+          const isCurrentHourTheSpecificDebugHour = (isDebuggingThisSpecificSlotIteration && hChile === 15 && mChile === 0);
+          if (skipReason && !isCurrentHourTheSpecificDebugHour ) { continue; } 
 
           const slotStartUtc = convertChileTimeToUtc(currentDayProcessingUtcStart, hChile, mChile);
           const slotDayIdentifierInChile = getDayIdentifier(slotStartUtc, 'America/Santiago');
           if (isNaN(slotStartUtc.getTime())) { console.log(`    DESCARTADO para ${requestClientId}: Slot UTC inválido.`); continue; }
           const slightlyFutureServerNowUtc = new Date(serverNowUtc.getTime() + 1 * 60 * 1000); 
-          if (slotStartUtc < slightlyFutureServerNowUtc && !isCurrentSlotTheSpecificDebugHour) { continue; } 
+          if (slotStartUtc < slightlyFutureServerNowUtc && !isCurrentHourTheSpecificDebugHour) { continue; } 
 
           if (targetDateIdentifierForSlotFilter) { 
             if (slotDayIdentifierInChile !== targetDateIdentifierForSlotFilter) {
@@ -534,7 +537,7 @@ export default async function handler(req, res) {
           slotEndUtc.setUTCMinutes(slotEndUtc.getUTCMinutes() + 30);
           const isBusy = busySlots.some(busy => slotStartUtc.getTime() < busy.end && slotEndUtc.getTime() > busy.start);
           
-          if (isCurrentSlotTheSpecificDebugHour) {
+          if (isCurrentHourTheSpecificDebugHour) {
             console.log(`   DEBUG JUEVES 3PM: slotStartUtc=${slotStartUtc.toISOString()}, isBusy=${isBusy}`);
             if (targetHourChile !== null) { 
                 const conditionMatches = (hChile === targetHourChile && mChile === targetMinuteChile);
@@ -554,7 +557,7 @@ export default async function handler(req, res) {
                 if (busyStart.getUTCFullYear() === currentDayProcessingUtcStart.getUTCFullYear() &&
                     busyStart.getUTCMonth() === currentDayProcessingUtcStart.getUTCMonth() &&
                     busyStart.getUTCDate() === currentDayProcessingUtcStart.getUTCDate()) {
-                    // Usar slotStartUtc y slotEndUtc del slot actual de 15:00 que estamos debuggeando
+                    // slotStartUtc aquí es el slot de las 15:00 (Jueves)
                     if (slotStartUtc.getTime() < busyEnd.getTime() && slotEndUtc.getTime() > busyStart.getTime()) {
                          console.log(`     - RELEVANTE Busy (para el slot ${hChile}:${mChile}): ${busyStart.toISOString()} to ${busyEnd.toISOString()}`);
                     }
@@ -562,8 +565,9 @@ export default async function handler(req, res) {
             });
             console.log(`🔍 END DEBUGGING "MAÑANA JUEVES 3PM" SLOT PROCESSING (Loop iteration)\n`);
           }
-          if (skipReason) continue; 
-          if (slotStartUtc < slightlyFutureServerNowUtc) continue; 
+          if (skipReason && !isCurrentHourTheSpecificDebugHour) continue; 
+          if (slotStartUtc < slightlyFutureServerNowUtc && !isCurrentHourTheSpecificDebugHour) continue; 
+
 
           if (!isBusy) { 
             const formattedSlot = new Intl.DateTimeFormat('es-CL', {weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'America/Santiago'}).format(slotStartUtc);
@@ -604,7 +608,7 @@ export default async function handler(req, res) {
       else { console.log(`🔎 Slots encontrados para ${requestClientId} en búsqueda genérica (próximos ${effectiveConfig.calendarQueryDays} días): ${availableSlotsOutput.length} (después del bucle, antes de formateo final)`); }
       
       let replyCalendar = ''; 
-      const slightlyFutureServerNowUtcForResponse = new Date(serverNowUtc.getTime() + 1 * 60 * 1000); // Renombrada para evitar colisión
+      const slightlyFutureServerNowUtcForResponse = new Date(serverNowUtc.getTime() + 1 * 60 * 1000); 
 
       if (targetHourChile !== null) { 
         let specificTimeQueryFormattedForMsg = "";
@@ -633,8 +637,12 @@ export default async function handler(req, res) {
             const dayToSearchAlternatives = targetDateForDisplay || refDateForTargetCalc;
 
             if (dayToSearchAlternatives) {
-                const isDebuggingThisQueryForAlternatives = (targetHourChile === 15 && targetMinuteChile === 0 && (getDayIdentifier(dayToSearchAlternatives, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE));
-                if (isDebuggingThisQueryForAlternatives || process.env.NODE_ENV === 'development'){ 
+                // Condición para loguear la búsqueda de alternativas solo para el caso Jueves 3pm o en desarrollo
+                const shouldLogAlternativesSearch = (targetHourChile === 15 && targetMinuteChile === 0 && 
+                                                    (getDayIdentifier(dayToSearchAlternatives, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE)) 
+                                                    || process.env.NODE_ENV === 'development';
+
+                if (shouldLogAlternativesSearch){ 
                     console.log(`DEBUG: Hora específica ${targetHourChile}:${targetMinuteChile} no disponible para ${getDayIdentifier(dayToSearchAlternatives, 'America/Santiago')}. Buscando alternativas para ese día. ClientId: ${requestClientId}`);
                 }
                 for (const timeChileStr of WORKING_HOURS_CHILE_STR) {
@@ -642,7 +650,7 @@ export default async function handler(req, res) {
                     if (hC === targetHourChile && mC === targetMinuteChile) continue; 
 
                     const slotStartUtcAlt = convertChileTimeToUtc(dayToSearchAlternatives, hC, mC);
-                    if (slotStartUtcAlt < slightlyFutureServerNowUtcForResponse) continue; // Usar la variable renombrada
+                    if (slotStartUtcAlt < slightlyFutureServerNowUtcForResponse) continue; 
                     
                     const slotEndUtcAlt = new Date(slotStartUtcAlt);
                     slotEndUtcAlt.setUTCMinutes(slotEndUtcAlt.getUTCMinutes() + 30);
