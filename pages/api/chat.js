@@ -1,14 +1,18 @@
 // /pages/api/chat.js
-import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager.js';
-import { validateRequest } from '@/lib/chat_modules/request_validator.js';
-import { getCalendarInstance } from '@/lib/chat_modules/calendar_client_provider.js';
-import { CHILE_UTC_OFFSET_HOURS, getDayIdentifier } from '@/lib/chat_modules/dateTimeUtils.js';
-import { isCalendarQuery, parseDateTimeQuery } from '@/lib/chat_modules/date_time_parser.js';
-import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator.js';
-import { buildCalendarResponse } from '@/lib/chat_modules/response_builder.js';
-import { getOpenAIReply } from '@/lib/chat_modules/openai_handler.js';
+import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager';
+import { validateRequest } from '@/lib/chat_modules/request_validator';
+import { getCalendarInstance } from '@/lib/chat_modules/calendar_client_provider';
+import { CHILE_UTC_OFFSET_HOURS, getDayIdentifier } from '@/lib/chat_modules/dateTimeUtils';
+import { 
+    isCalendarQuery, 
+    parseDateTimeQuery, 
+    testFunctionDTP // <--- Importar la nueva función de prueba
+} from '@/lib/chat_modules/date_time_parser'; // Quitando .js
+import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator';
+import { buildCalendarResponse } from '@/lib/chat_modules/response_builder';
+import { getOpenAIReply } from '@/lib/chat_modules/openai_handler';
 import { logRigbotMessage } from "@/lib/rigbotLog"; 
-import { db } from '@/lib/firebase-admin'; // db es usado por algunos módulos, pero el import aquí es por si acaso o si se usa directamente.
+import { db } from '@/lib/firebase-admin'; 
 
 export default async function handler(req, res) {
   const validationResult = await validateRequest(req, res); 
@@ -16,7 +20,6 @@ export default async function handler(req, res) {
     return; 
   }
 
-  // Desestructurar con cuidado para evitar 'undefined' si validationResult.clientConfigData es null (aunque no debería serlo si handled es false)
   const clientConfigData = validationResult.clientConfigData || {}; 
   const requestData = validationResult.requestData || {};
   const { message, sessionId: currentSessionId, clientId: requestClientId, ipAddress } = requestData;
@@ -27,13 +30,16 @@ export default async function handler(req, res) {
   try {
     const lowerMessage = message.toLowerCase();
 
-    if (isCalendarQuery(lowerMessage)) {
+    // Llamar a la función de prueba
+    const testResult = testFunctionDTP(); // <--- Llamada a la función de prueba
+    console.log("DEBUG_ORCHESTRATOR: testFunctionDTP result:", testResult); 
+
+    if (isCalendarQuery(lowerMessage)) { 
       const serverNowUtc = new Date();
       const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
       
       const currentMonthForRef = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1;
       const currentDayForRef = parseInt(new Intl.DateTimeFormat('en-US', { day: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
-      // CHILE_UTC_OFFSET_HOURS debe ser importado o definido aquí si se usa directamente
       const refDateTimestamp = Date.UTC(currentYearChile, currentMonthForRef, currentDayForRef, 0 - CHILE_UTC_OFFSET_HOURS, 0, 0, 0);
       const refDateForTargetCalc = new Date(refDateTimestamp);
 
@@ -77,8 +83,6 @@ export default async function handler(req, res) {
           console.error(`❌ ERROR en fetchBusySlots (orquestador) para ${requestClientId}:`, googleError.message);
           const errorResponsePayload = { error: 'Error al consultar el calendario de Google.', details: googleError.message };
           if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno calendario: ${errorResponsePayload.error} Detalles: ${errorResponsePayload.details}`, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId });} catch(e){console.error("Log Error (fetchBusySlots catch):",e)} }
-          // Si googleError.code es 401, calendar_client_provider ya debería haber intentado invalidar los tokens.
-          // Aquí simplemente devolvemos el error al usuario.
           return res.status(500).json(errorResponsePayload);
       }
       
