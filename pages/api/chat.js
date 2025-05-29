@@ -243,8 +243,9 @@ export default async function handler(req, res) {
       const currentMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1; 
       const currentDayOfMonthChile = parseInt(new Intl.DateTimeFormat('en-US', { day: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
       const todayChile0000UtcTimestamp = Date.UTC(currentYearChile, currentMonthChile, currentDayOfMonthChile, 0 - CHILE_UTC_OFFSET_HOURS, 0, 0, 0);
-      const refDateForTargetCalc = new Date(todayChile0000UtcTimestamp);
+      const refDateForTargetCalc = new Date(todayChile0000UtcTimestamp); // Start of today in Chile, as UTC date
       const actualCurrentDayOfWeekInChile = refDateForTargetCalc.getUTCDay(); 
+      const TOMORROW_DATE_IDENTIFIER_CHILE = getDayIdentifier(new Date(refDateForTargetCalc.getTime() + 24*60*60*1000), 'America/Santiago');
       
       const specificDateRegex = /(?:(\b(?:lunes|martes|mi[ée]rcoles|jueves|viernes|s[áa]bado|domingo)\b),?\s+)?(\d{1,2})(?:\s+de)?\s+(\b(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)\b)/i;
       const specificDateMatch = lowerMessage.match(specificDateRegex);
@@ -315,11 +316,12 @@ export default async function handler(req, res) {
       } else if (lowerMessage.includes('hoy')) { 
         targetDateForDisplay = new Date(refDateForTargetCalc);
       } else if (lowerMessage.includes('mañana') && !lowerMessage.includes('pasado mañana')) { 
-        if (!lowerMessage.match(/\b(en|por)\s+la\s+mañana\b/i) || !dayKeywordFound) { 
+        const isJustTomorrowDayQuery = /\bmañana\b(?![\wáéíóú])/i.test(lowerMessage) && !lowerMessage.match(/\b(en|por)\s+la\s+mañana\b/i);
+        if (isJustTomorrowDayQuery || !dayKeywordFound) { // if "mañana" is standalone or no other day was specified
             targetDateForDisplay = new Date(refDateForTargetCalc);
             targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + 1);
-        } else if (!targetDateForDisplay && dayKeywordFound) {
-            console.log("DEBUG: 'mañana' (franja) detectada pero no se aplicó 'mañana' (día) porque dayKeywordFound era true y targetDateForDisplay no se seteó, o 'mañana' era parte de una frase.")
+        } else {
+            console.log("DEBUG: 'mañana' (palabra) presente pero no se usó para día por `dayKeywordFound` o no era standalone.")
         }
       } else if (isAnyNextWeekIndicator) { 
           targetDateForDisplay = new Date(refDateForTargetCalc);
@@ -355,9 +357,9 @@ export default async function handler(req, res) {
             timeOfDay = 'afternoon';
         } else if (mananaPattern.test(lowerMessage)) {
             const isTargetToday = targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === getDayIdentifier(refDateForTargetCalc, 'America/Santiago');
-            const isTargetTomorrowDay = targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === getDayIdentifier(new Date(refDateForTargetCalc.getTime() + 24*60*60*1000), 'America/Santiago');
+            const isTargetTomorrowDayByDate = targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE;
             
-            if (!targetDateForDisplay || isTargetToday || isTargetTomorrowDay || dayKeywordFound || specificDateParsed ) {
+            if (!targetDateForDisplay || isTargetToday || isTargetTomorrowDayByDate || dayKeywordFound || specificDateParsed ) {
                 timeOfDay = 'morning';
             }
         }
@@ -469,14 +471,8 @@ export default async function handler(req, res) {
         }).filter(Boolean); 
       console.log(`INFO: Se obtuvieron ${eventsFromGoogle.length} eventos y se procesaron ${busySlots.length} busy slots (ignorando all-day) del calendario para ${requestClientId}.`);
       if (busySlots.length > 0 && process.env.NODE_ENV === 'development') { 
-        console.log(`DEBUG: Contenido de busySlots (eventos UTC de Google Calendar) para ${requestClientId}:`);
-        busySlots.forEach((bs, index) => {
-          const eventStartDate = new Date(bs.start);
-          const eventEndDate = new Date(bs.end);
-          if (eventEndDate > calendarQueryStartUtc && eventStartDate < calendarQueryEndUtc) { 
-            console.log(`  BusySlot ${index}: Start: ${eventStartDate.toISOString()}, End: ${eventEndDate.toISOString()}`);
-          }
-        });
+        // console.log(`DEBUG: Contenido de busySlots (eventos UTC de Google Calendar) para ${requestClientId}:`); // Puede ser muy verboso
+        // busySlots.forEach((bs, index) => { /* ... */ }); // Comentado para no inundar logs
       }
 
       const WORKING_HOURS_CHILE_STR = [
@@ -499,7 +495,19 @@ export default async function handler(req, res) {
         const currentDayProcessingUtcStart = new Date(baseIterationDateDayUtcStart);
         currentDayProcessingUtcStart.setUTCDate(baseIterationDateDayUtcStart.getUTCDate() + i);
         const currentDayProcessingIdentifierChile = getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago');
-        if (process.env.NODE_ENV === 'development') {
+        
+        // ========= INICIO LOG DE DEBUG ESPECÍFICO PARA JUEVES 3PM =========
+        const isDebuggingThursday3PM = (targetHourChile === 15 && targetMinuteChile === 0 && 
+                                       currentDayProcessingIdentifierChile === TOMORROW_DATE_IDENTIFIER_CHILE // TOMORROW_DATE_IDENTIFIER_CHILE es "mañana"
+                                      );
+        if (isDebuggingThursday3PM && process.env.NODE_ENV === 'development') {
+            console.log(`\n🔍 DEBUGGING "MAÑANA JUEVES 3PM" SLOT PROCESSING (ClientId: ${requestClientId}):`);
+            console.log(`   Current Day (Chile): ${currentDayProcessingIdentifierChile}, Slot Time (Chile) being checked: 15:00`);
+            console.log(`   User's Target Hour/Minute (Chile): ${targetHourChile}:${targetMinuteChile}`);
+        }
+        // ========= FIN LOG DE DEBUG ESPECÍFICO PARA JUEVES 3PM =========
+
+        if (process.env.NODE_ENV === 'development' && !isDebuggingThursday3PM ) { // Log normal para otros días/horas en dev
            console.log(`\nDEBUG: Bucle Día i=${i} para ${requestClientId}. Iterando para día UTC: ${currentDayProcessingUtcStart.toISOString()} (Corresponde al día de Chile: ${currentDayProcessingIdentifierChile})`);
             if (targetDateIdentifierForSlotFilter) {
                  console.log(`DEBUG: comparando con targetDateIdentifierForSlotFilter para ${requestClientId}: ${targetDateIdentifierForSlotFilter}`);
@@ -510,20 +518,18 @@ export default async function handler(req, res) {
           const [hChile, mChile] = timeChileStr.split(':').map(Number);
           let skipReason = ""; 
           if (targetHourChile !== null) { 
-              // Si se busca una hora específica, solo nos interesa ESE slot en este bucle.
-              // No aplicamos timeOfDay aquí.
               if (hChile !== targetHourChile || mChile !== targetMinuteChile) { skipReason = "Filtro de hora específica"; }
           } else if (timeOfDay) { 
             if (timeOfDay === 'morning' && (hChile < 10 || hChile >= 14)) skipReason = "Filtro franja mañana";
             if (timeOfDay === 'afternoon' && (hChile < 14 || hChile > 19 || (hChile === 19 && mChile > 30))) skipReason = "Filtro franja tarde";
           }
-          if (skipReason) { continue; }
+          if (skipReason && !(isDebuggingThursday3PM && hChile === 15 && mChile === 0) ) { continue; } // No saltar si estamos debuggeando Jueves 3pm para ver su estado isBusy
 
           const slotStartUtc = convertChileTimeToUtc(currentDayProcessingUtcStart, hChile, mChile);
           const slotDayIdentifierInChile = getDayIdentifier(slotStartUtc, 'America/Santiago');
           if (isNaN(slotStartUtc.getTime())) { console.log(`    DESCARTADO para ${requestClientId}: Slot UTC inválido.`); continue; }
           const slightlyFutureServerNowUtc = new Date(serverNowUtc.getTime() + 1 * 60 * 1000); 
-          if (slotStartUtc < slightlyFutureServerNowUtc) { continue; } 
+          if (slotStartUtc < slightlyFutureServerNowUtc && !(isDebuggingThursday3PM && hChile === 15 && mChile === 0)) { continue; } 
 
           if (targetDateIdentifierForSlotFilter) { 
             if (slotDayIdentifierInChile !== targetDateIdentifierForSlotFilter) {
@@ -534,6 +540,35 @@ export default async function handler(req, res) {
           slotEndUtc.setUTCMinutes(slotEndUtc.getUTCMinutes() + 30);
           const isBusy = busySlots.some(busy => slotStartUtc.getTime() < busy.end && slotEndUtc.getTime() > busy.start);
           
+          if (isDebuggingThursday3PM && hChile === 15 && mChile === 0) {
+            console.log(`   DEBUG JUEVES 3PM: slotStartUtc=${slotStartUtc.toISOString()}, isBusy=${isBusy}`);
+            if (targetHourChile !== null) {
+                const conditionMatches = (hChile === targetHourChile && mChile === targetMinuteChile);
+                console.log(`   DEBUG JUEVES 3PM: Condition (hChile === targetHourChile && mChile === targetMinuteChile) is: ${conditionMatches}`);
+                if (!isBusy && conditionMatches) {
+                    console.log(`   DEBUG JUEVES 3PM: ✅ This slot SHOULD be added to availableSlotsOutput for specific time query.`);
+                } else if (isBusy) {
+                    console.log(`   DEBUG JUEVES 3PM: ❌ This slot is busy, so it won't be added.`);
+                } else if (!conditionMatches) {
+                    console.log(`   DEBUG JUEVES 3PM: ❌ Hour/minute mismatch, so it won't be added for specific time query.`);
+                }
+            }
+            console.log(`   DEBUG JUEVES 3PM: Busy slots around this time for ${currentDayProcessingIdentifierChile} (raw from Google, times in UTC):`);
+            busySlots.forEach(bs => {
+                const busyStart = new Date(bs.start);
+                const busyEnd = new Date(bs.end);
+                if (busyStart.getUTCFullYear() === currentDayProcessingUtcStart.getUTCFullYear() &&
+                    busyStart.getUTCMonth() === currentDayProcessingUtcStart.getUTCMonth() &&
+                    busyStart.getUTCDate() === currentDayProcessingUtcStart.getUTCDate()) {
+                    console.log(`     - Busy: ${busyStart.toISOString()} to ${busyEnd.toISOString()}`);
+                }
+            });
+            console.log(`🔍 END DEBUGGING "MAÑANA JUEVES 3PM" SLOT PROCESSING (Loop iteration)\n`);
+          }
+          if (skipReason) continue; // Aplicar el skipReason aquí si no estábamos debuggeando Jueves 3pm
+          if (slotStartUtc < slightlyFutureServerNowUtc) continue; // Aplicar skip de slot pasado aquí si no debuggeando
+
+
           if (!isBusy) { 
             const formattedSlot = new Intl.DateTimeFormat('es-CL', {weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'America/Santiago'}).format(slotStartUtc);
             availableSlotsOutput.push(formattedSlot); 
@@ -541,17 +576,38 @@ export default async function handler(req, res) {
         } 
         if (targetDateIdentifierForSlotFilter && getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago') === targetDateIdentifierForSlotFilter) {
             if (availableSlotsOutput.length >= effectiveConfig.maxSuggestions && !targetHourChile ) break; 
-            if (targetHourChile !== null && availableSlotsOutput.find(slot => slot.includes(targetHourChile.toString().padStart(2, '0') + ":" + targetMinuteChile.toString().padStart(2, '0')))) break; // Si se buscó hora específica y se encontró
-            if (targetHourChile !== null && i === 0 ) break; // Si se buscó hora específica y ya pasamos el día, no seguir buscando esa hora en otros días.
+            const specificSlotWasFound = availableSlotsOutput.find(slot => {
+                const timePartMatch = slot.match(/(\d{2}:\d{2})\s*(a\. m\.|p\. m\.)/);
+                if (timePartMatch && targetHourChile !==null) {
+                    const slotHourMin = timePartMatch[1]; 
+                    let [slotH, slotM] = slotHourMin.split(':').map(Number); 
+                    const slotPeriod = timePartMatch[2]; 
+                    if (slotPeriod.includes('p. m.') && slotH >= 1 && slotH <= 11) slotH += 12; 
+                    if (slotPeriod.includes('a. m.') && slotH === 12) slotH = 0; 
+                    return slotH === targetHourChile && slotM === targetMinuteChile;
+                } return false;
+            });
+            if (targetHourChile !== null && specificSlotWasFound) break; 
+            if (targetHourChile !== null && i === 0 ) break; 
         }
         if (availableSlotsOutput.length >= effectiveConfig.maxSuggestions && !targetDateIdentifierForSlotFilter && !targetHourChile && processedDaysForGenericQuery.size >=2) break; 
       } 
       
-      if(targetDateIdentifierForSlotFilter) { console.log(`🔎 Slots encontrados para ${requestClientId} el día de Chile ${targetDateIdentifierForSlotFilter}: ${availableSlotsOutput.length} (antes de formateo final)`); } 
-      else { console.log(`🔎 Slots encontrados para ${requestClientId} en búsqueda genérica (próximos ${effectiveConfig.calendarQueryDays} días): ${availableSlotsOutput.length} (antes de formateo final)`); }
+      // ========= LOG DE DEBUG ANTES DE requestedSlotExactMatch =========
+      if (targetHourChile === 15 && targetMinuteChile === 0 && targetDateIdentifierForSlotFilter === TOMORROW_DATE_IDENTIFIER_CHILE && process.env.NODE_ENV === 'development' ) {
+        console.log(`\n🔍 DEBUGGING "MAÑANA JUEVES 3PM" RESPONSE PREP (ClientId: ${requestClientId}):`);
+        console.log(`   targetHourChile: ${targetHourChile}, targetMinuteChile: ${targetMinuteChile}`);
+        console.log(`   targetDateIdentifierForSlotFilter: ${targetDateIdentifierForSlotFilter}`);
+        console.log(`   AvailableSlotsOutput before .find() for requestedSlotExactMatch (length ${availableSlotsOutput.length}):`);
+        availableSlotsOutput.forEach((s, idx) => console.log(`    - Slot ${idx}: ${s}`));
+        console.log(`🔍 END DEBUGGING "MAÑANA JUEVES 3PM" RESPONSE PREP\n`);
+      }
+      // ===============================================================
+      if(targetDateIdentifierForSlotFilter) { console.log(`🔎 Slots encontrados para ${requestClientId} el día de Chile ${targetDateIdentifierForSlotFilter}: ${availableSlotsOutput.length} (después del bucle, antes de formateo final)`); } 
+      else { console.log(`🔎 Slots encontrados para ${requestClientId} en búsqueda genérica (próximos ${effectiveConfig.calendarQueryDays} días): ${availableSlotsOutput.length} (después del bucle, antes de formateo final)`); }
       
       let replyCalendar = ''; 
-      const slightlyFutureServerNowUtc = new Date(serverNowUtc.getTime() + 1 * 60 * 1000); // Necesaria para el bucle de alternativas
+      const slightlyFutureServerNowUtc = new Date(serverNowUtc.getTime() + 1 * 60 * 1000); 
 
       if (targetHourChile !== null) { 
         let specificTimeQueryFormattedForMsg = "";
@@ -560,15 +616,13 @@ export default async function handler(req, res) {
         specificTimeQueryFormattedForMsg += `a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
 
         const requestedSlotExactMatch = availableSlotsOutput.find(slot => {
-            // Extraer la hora del formattedSlot para comparar con targetHourChile y targetMinuteChile
-            // ej. "jueves, 29 de mayo, 10:00 a. m."
-            const timePartMatch = slot.match(/(\d{2}:\d{2})\s*(a\. m\.|p\. m\.)/);
+            const timePartMatch = slot.match(/(\d{2}:\d{2})\s*(a\. m\.|p\. m\.)/i); // 'i' para case-insensitive en am/pm
             if (timePartMatch) {
-                const slotHourMin = timePartMatch[1]; // "10:00"
-                let [slotH, slotM] = slotHourMin.split(':').map(Number);
-                const slotPeriod = timePartMatch[2];
-                if (slotPeriod.includes('p. m.') && slotH >= 1 && slotH <= 11) slotH += 12;
-                if (slotPeriod.includes('a. m.') && slotH === 12) slotH = 0; // 12 AM es 00 horas
+                const slotHourMin = timePartMatch[1]; 
+                let [slotH, slotM] = slotHourMin.split(':').map(Number); 
+                const slotPeriod = timePartMatch[2].toLowerCase(); 
+                if (slotPeriod.includes('p. m.') && slotH >= 1 && slotH <= 11) slotH += 12; 
+                if (slotPeriod.includes('a. m.') && slotH === 12) slotH = 0; 
                 return slotH === targetHourChile && slotM === targetMinuteChile;
             }
             return false;
@@ -582,7 +636,9 @@ export default async function handler(req, res) {
             const dayToSearchAlternatives = targetDateForDisplay || refDateForTargetCalc;
 
             if (dayToSearchAlternatives) {
-                console.log(`DEBUG: Hora específica ${targetHourChile}:${targetMinuteChile} no disponible para ${getDayIdentifier(dayToSearchAlternatives, 'America/Santiago')}. Buscando alternativas para ese día.`);
+                if (process.env.NODE_ENV === 'development') {
+                    console.log(`DEBUG: Hora específica ${targetHourChile}:${targetMinuteChile} no disponible para ${getDayIdentifier(dayToSearchAlternatives, 'America/Santiago')}. Buscando alternativas para ese día.`);
+                }
                 for (const timeChileStr of WORKING_HOURS_CHILE_STR) {
                     const [hC, mC] = timeChileStr.split(':').map(Number);
                     if (hC === targetHourChile && mC === targetMinuteChile) continue; 
@@ -629,7 +685,7 @@ export default async function handler(req, res) {
         intro += '. ¡A ver si alguna te acomoda! 🥳:';
         
         let finalSuggestions = [];
-        if (!targetDateIdentifierForSlotFilter && !targetHourChile) { // Solo aplicar lógica de diversidad de días si es una búsqueda muy genérica
+        if (!targetDateIdentifierForSlotFilter && !targetHourChile) { 
             const slotsByDay = {};
             for (const slot of availableSlotsOutput) {
                 const dayKey = slot.split(',').slice(0,2).join(','); 
@@ -650,7 +706,7 @@ export default async function handler(req, res) {
                 }
                 if (count >= effectiveConfig.maxSuggestions) break; 
             }
-        } else { // Para búsquedas de día específico o franja, tomar directamente de availableSlotsOutput
+        } else { 
              finalSuggestions = availableSlotsOutput.slice(0, effectiveConfig.maxSuggestions);
         }
                 
