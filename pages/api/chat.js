@@ -493,15 +493,14 @@ export default async function handler(req, res) {
         const currentDayProcessingIdentifierChile = getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago');
         
         const isCurrentDayTomorrow = currentDayProcessingIdentifierChile === TOMORROW_DATE_IDENTIFIER_CHILE;
-        let isDebuggingThisSpecificSlotIteration = false; // Variable de bandera para los logs detallados
+        let isDebuggingThisSpecificSlotIteration = false; 
 
-        // Condición para activar logs detallados solo para Jueves 3pm
         if (targetHourChile === 15 && targetMinuteChile === 0 && isCurrentDayTomorrow) {
             isDebuggingThisSpecificSlotIteration = true; 
             console.log(`\n🔍 DEBUGGING "MAÑANA JUEVES 3PM" SLOT PROCESSING (ClientId: ${requestClientId}):`);
             console.log(`   Current Day (Chile): ${currentDayProcessingIdentifierChile}, Slot Time (Chile) being checked: 15:00`);
             console.log(`   User's Target Hour/Minute (Chile): ${targetHourChile}:${targetMinuteChile}`);
-        } else if (process.env.NODE_ENV === 'development') { // Log general para otros casos solo en dev
+        } else if (process.env.NODE_ENV === 'development') { 
            console.log(`\nDEBUG: Bucle Día i=${i} para ${requestClientId}. Iterando para día UTC: ${currentDayProcessingUtcStart.toISOString()} (Corresponde al día de Chile: ${currentDayProcessingIdentifierChile})`);
             if (targetDateIdentifierForSlotFilter) {
                  console.log(`DEBUG: comparando con targetDateIdentifierForSlotFilter para ${requestClientId}: ${targetDateIdentifierForSlotFilter}`);
@@ -536,7 +535,7 @@ export default async function handler(req, res) {
           slotEndUtc.setUTCMinutes(slotEndUtc.getUTCMinutes() + 30);
           const isBusy = busySlots.some(busy => slotStartUtc.getTime() < busy.end && slotEndUtc.getTime() > busy.start);
           
-          if (isCurrentHourTheSpecificDebugHour) { // Solo para el slot 15:00 del Jueves 29
+          if (isCurrentHourTheSpecificDebugHour) {
             console.log(`   DEBUG JUEVES 3PM: slotStartUtc=${slotStartUtc.toISOString()}, isBusy=${isBusy}`);
             if (targetHourChile !== null) { 
                 const conditionMatches = (hChile === targetHourChile && mChile === targetMinuteChile);
@@ -556,7 +555,6 @@ export default async function handler(req, res) {
                 if (busyStart.getUTCFullYear() === currentDayProcessingUtcStart.getUTCFullYear() &&
                     busyStart.getUTCMonth() === currentDayProcessingUtcStart.getUTCMonth() &&
                     busyStart.getUTCDate() === currentDayProcessingUtcStart.getUTCDate()) {
-                    // slotStartUtc y slotEndUtc aquí son los del slot actual de 15:00 que estamos debuggeando
                     if (slotStartUtc.getTime() < busyEnd.getTime() && slotEndUtc.getTime() > busyStart.getTime()) {
                          console.log(`     - RELEVANTE Busy (para el slot ${hChile}:${mChile}): ${busyStart.toISOString()} to ${busyEnd.toISOString()}`);
                     }
@@ -564,7 +562,6 @@ export default async function handler(req, res) {
             });
             console.log(`🔍 END DEBUGGING "MAÑANA JUEVES 3PM" SLOT PROCESSING (Loop iteration)\n`);
           }
-          // Re-aplicar skipReasons después de los logs de debug para el slot específico
           if (skipReason && !isCurrentHourTheSpecificDebugHour) continue; 
           if (slotStartUtc < slightlyFutureServerNowUtc && !isCurrentHourTheSpecificDebugHour) continue; 
 
@@ -577,7 +574,7 @@ export default async function handler(req, res) {
         if (targetDateIdentifierForSlotFilter && getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago') === targetDateIdentifierForSlotFilter) {
             if (availableSlotsOutput.length >= effectiveConfig.maxSuggestions && !targetHourChile ) break; 
             const specificSlotWasFound = availableSlotsOutput.find(slot => {
-                const normalizedSlotStr = slot.replace(/[\s\u00A0\u202F]+/g, ' '); // Normalizar espacios
+                const normalizedSlotStr = slot.replace(/[\s\u00A0\u202F]+/g, ' ');
                 const timePartMatch = normalizedSlotStr.match(/(\d{1,2}:\d{2})\s(a\.?m\.?|p\.?m\.?)/i);
                 if (timePartMatch && targetHourChile !==null) {
                     const slotHourMin = timePartMatch[1]; 
@@ -596,12 +593,12 @@ export default async function handler(req, res) {
         if (availableSlotsOutput.length >= effectiveConfig.maxSuggestions && !targetDateIdentifierForSlotFilter && !targetHourChile && processedDaysForGenericQuery.size >=2) break; 
       } 
       
-      // Condición para activar logs de RESPONSE PREP
-      const isDebuggingQueryForResponsePrep = (targetHourChile === 15 && targetMinuteChile === 0 && 
+      // Variable para condicionar los logs de RESPONSE PREP y FIND CB
+      const isDebuggingQueryForResponseFind = (targetHourChile === 15 && targetMinuteChile === 0 && 
                                               (targetDateIdentifierForSlotFilter === TOMORROW_DATE_IDENTIFIER_CHILE || 
                                               (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE ) ) 
                                              );
-      if (isDebuggingQueryForResponsePrep) { 
+      if (isDebuggingQueryForResponseFind) { 
         console.log(`\n🔍 DEBUGGING "MAÑANA JUEVES 3PM" RESPONSE PREP (ClientId: ${requestClientId}):`);
         console.log(`   targetHourChile: ${targetHourChile}, targetMinuteChile: ${targetMinuteChile}`);
         console.log(`   targetDateIdentifierForSlotFilter: ${targetDateIdentifierForSlotFilter}`);
@@ -622,18 +619,16 @@ export default async function handler(req, res) {
         specificTimeQueryFormattedForMsg += `a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
 
         const requestedSlotExactMatch = availableSlotsOutput.find(slotString => {
-            const isTargetingForFindCBLog = (targetHourChile === 15 && targetMinuteChile === 0 && 
-                                             (targetDateIdentifierForSlotFilter === TOMORROW_DATE_IDENTIFIER_CHILE || 
-                                             (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE ) ) );
-            if (isTargetingForFindCBLog) {
+            if (isDebuggingQueryForResponseFind) { // Usar la misma variable de bandera
                 console.log(`🔍 DEBUG FIND CB [Slot String]: "${slotString}" (length: ${slotString.length})`);
             }
             const normalizedSlotString = slotString.replace(/[\s\u00A0\u202F]+/g, ' ');
-            const timePartMatch = normalizedSlotString.match(/(\d{1,2}:\d{2})\s(a\.?m\.?|p\.?m\.?)/i); 
+            // Regex ajustado para ser más flexible con el espacio y los puntos en a.m./p.m.
+            const timePartMatch = normalizedSlotString.match(/(\d{1,2}:\d{2})(?:\s|\u00A0|\u202F)+(a\.?m\.?|p\.?m\.?)/i); 
             
-            if (isTargetingForFindCBLog) {
+            if (isDebuggingQueryForResponseFind) {
                 console.log(`🔍 DEBUG FIND CB: Normalized string for regex: "${normalizedSlotString}"`);
-                console.log(`🔍 DEBUG FIND CB: timePartMatch (using /(\\d{1,2}:\\d{2})\\s(a\\.?m\\.?|p\\.?m\\.?)/i ):`, timePartMatch);
+                console.log(`🔍 DEBUG FIND CB: timePartMatch:`, timePartMatch);
             }
 
             if (timePartMatch) {
@@ -641,7 +636,7 @@ export default async function handler(req, res) {
                 let [slotH, slotM] = slotHourMin.split(':').map(Number); 
                 const slotPeriod = timePartMatch[2] ? timePartMatch[2].toLowerCase().replace(/\./g, '').trim() : null;
 
-                if (isTargetingForFindCBLog) {
+                if (isDebuggingQueryForResponseFind) {
                     console.log(`🔍 DEBUG FIND CB: slotH=${slotH}, slotM=${slotM}, slotPeriod="${slotPeriod}" (original from regex: "${timePartMatch[2]}")`);
                 }
                 
@@ -650,22 +645,22 @@ export default async function handler(req, res) {
                     if (slotPeriod === 'am' && slotH === 12) slotH = 0; 
                 }
 
-                if (isTargetingForFindCBLog) {
+                if (isDebuggingQueryForResponseFind) {
                     console.log(`🔍 DEBUG FIND CB: slotH convertido=${slotH}. Comparando con targetHourChile=${targetHourChile}`);
                 }
                 const match = (slotH === targetHourChile && slotM === targetMinuteChile);
-                if (isTargetingForFindCBLog) {
+                if (isDebuggingQueryForResponseFind) {
                      console.log(`🔍 DEBUG FIND CB: Resultado de la comparación: ${match}`);
                 }
                 return match;
             }
-            if (isTargetingForFindCBLog) {
+            if (isDebuggingQueryForResponseFind) {
                 console.log(`🔍 DEBUG FIND CB: timePartMatch fue null para "${normalizedSlotString}".`);
             }
             return false;
         });
         
-        if (isStillDebuggingThisQuery) { // Re-usar la variable de arriba para el log del resultado final del find
+        if (isDebuggingQueryForResponseFind) { // Usar la misma variable de bandera
             console.log("🔍 DEBUG FIND: Resultado de requestedSlotExactMatch:", requestedSlotExactMatch);
         }
 
@@ -677,11 +672,8 @@ export default async function handler(req, res) {
             const dayToSearchAlternatives = targetDateForDisplay || refDateForTargetCalc;
 
             if (dayToSearchAlternatives) {
-                const shouldLogAlternativesSearch = (targetHourChile === 15 && targetMinuteChile === 0 && 
-                                                    (getDayIdentifier(dayToSearchAlternatives, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE)) 
-                                                    || process.env.NODE_ENV === 'development';
-
-                if (shouldLogAlternativesSearch){ 
+                // Usar la misma variable de bandera para este log también
+                if (isDebuggingQueryForResponseFind || process.env.NODE_ENV === 'development'){ 
                     console.log(`DEBUG: Hora específica ${targetHourChile}:${targetMinuteChile} no disponible para ${getDayIdentifier(dayToSearchAlternatives, 'America/Santiago')}. Buscando alternativas para ese día. ClientId: ${requestClientId}`);
                 }
                 for (const timeChileStr of WORKING_HOURS_CHILE_STR) {
