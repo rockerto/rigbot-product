@@ -536,10 +536,10 @@ export default async function handler(req, res) {
           const isBusy = busySlots.some(busy => slotStartUtc.getTime() < busy.end && slotEndUtc.getTime() > busy.start);
           
           if (isCurrentHourTheSpecificDebugHour) {
-            // Definir tempSlotStartDebug y tempSlotEndDebug aquí para usarlas en el log de RELEVANTE Busy
-            const tempSlotStartDebugForBusyCheck = convertChileTimeToUtc(currentDayProcessingUtcStart, hChile, mChile);
-            const tempSlotEndDebugForBusyCheck = new Date(tempSlotStartDebugForBusyCheck);
-            tempSlotEndDebugForBusyCheck.setUTCMinutes(tempSlotEndDebugForBusyCheck.getUTCMinutes() + 30);
+            // Estas variables son para el log de RELEVANTE Busy, asegurando que usamos los valores correctos del slot 15:00
+            const slot1500StartUtc = convertChileTimeToUtc(currentDayProcessingUtcStart, 15, 0); 
+            const slot1500EndUtc = new Date(slot1500StartUtc);
+            slot1500EndUtc.setUTCMinutes(slot1500EndUtc.getUTCMinutes() + 30);
 
             console.log(`   DEBUG JUEVES 3PM: slotStartUtc=${slotStartUtc.toISOString()}, isBusy=${isBusy}`);
             if (targetHourChile !== null) { 
@@ -560,8 +560,8 @@ export default async function handler(req, res) {
                 if (busyStart.getUTCFullYear() === currentDayProcessingUtcStart.getUTCFullYear() &&
                     busyStart.getUTCMonth() === currentDayProcessingUtcStart.getUTCMonth() &&
                     busyStart.getUTCDate() === currentDayProcessingUtcStart.getUTCDate()) {
-                    if (tempSlotStartDebugForBusyCheck.getTime() < busyEnd.getTime() && tempSlotEndDebugForBusyCheck.getTime() > busyStart.getTime()) {
-                         console.log(`     - RELEVANTE Busy (para el slot ${hChile}:${mChile}): ${busyStart.toISOString()} to ${busyEnd.toISOString()}`);
+                    if (slot1500StartUtc.getTime() < busyEnd.getTime() && slot1500EndUtc.getTime() > busyStart.getTime()) { // CORREGIDO: usar slot1500Start/EndUtc
+                         console.log(`     - RELEVANTE Busy (para el slot 15:00): ${busyStart.toISOString()} to ${busyEnd.toISOString()}`);
                     }
                 }
             });
@@ -579,7 +579,8 @@ export default async function handler(req, res) {
         if (targetDateIdentifierForSlotFilter && getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago') === targetDateIdentifierForSlotFilter) {
             if (availableSlotsOutput.length >= effectiveConfig.maxSuggestions && !targetHourChile ) break; 
             const specificSlotWasFound = availableSlotsOutput.find(slot => {
-                const timePartMatch = slot.match(/(\d{1,2}:\d{2})\s*(a\. ?m\.?|p\. ?m\.?)/i); // Hora puede ser 1 o 2 digitos
+                const normalizedSlotStr = slot.replace(/[\s\u00A0]+/g, ' ');
+                const timePartMatch = normalizedSlotStr.match(/(\d{1,2}:\d{2})\s(a\.?m\.?|p\.?m\.?)/i);
                 if (timePartMatch && targetHourChile !==null) {
                     const slotHourMin = timePartMatch[1]; 
                     let [slotH, slotM] = slotHourMin.split(':').map(Number); 
@@ -597,15 +598,16 @@ export default async function handler(req, res) {
         if (availableSlotsOutput.length >= effectiveConfig.maxSuggestions && !targetDateIdentifierForSlotFilter && !targetHourChile && processedDaysForGenericQuery.size >=2) break; 
       } 
       
-      if (targetHourChile === 15 && targetMinuteChile === 0 && 
-          (targetDateIdentifierForSlotFilter === TOMORROW_DATE_IDENTIFIER_CHILE || 
-           (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE ) ) 
-         ) { 
+      const isStillDebuggingThisQuery = (targetHourChile === 15 && targetMinuteChile === 0 && 
+                                        (targetDateIdentifierForSlotFilter === TOMORROW_DATE_IDENTIFIER_CHILE || 
+                                        (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE ) ) 
+                                        );
+      if (isStillDebuggingThisQuery) { 
         console.log(`\n🔍 DEBUGGING "MAÑANA JUEVES 3PM" RESPONSE PREP (ClientId: ${requestClientId}):`);
         console.log(`   targetHourChile: ${targetHourChile}, targetMinuteChile: ${targetMinuteChile}`);
         console.log(`   targetDateIdentifierForSlotFilter: ${targetDateIdentifierForSlotFilter}`);
         console.log(`   AvailableSlotsOutput before .find() for requestedSlotExactMatch (length ${availableSlotsOutput.length}):`);
-        availableSlotsOutput.forEach((s, idx) => console.log(`    - Slot ${idx}: "${s}" (length: ${s.length})`)); // Log con más detalle
+        availableSlotsOutput.forEach((s, idx) => console.log(`    - Slot ${idx}: "${s}" (length: ${s.length})`));
         console.log(`🔍 END DEBUGGING "MAÑANA JUEVES 3PM" RESPONSE PREP\n`);
       }
       if(targetDateIdentifierForSlotFilter) { console.log(`🔎 Slots encontrados para ${requestClientId} el día de Chile ${targetDateIdentifierForSlotFilter}: ${availableSlotsOutput.length} (después del bucle, antes de formateo final)`); } 
@@ -620,22 +622,19 @@ export default async function handler(req, res) {
         specificTimeQueryFormattedForMsg += `${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(displayDateForMsg)} `;
         specificTimeQueryFormattedForMsg += `a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
 
-        const isTargetingThursday3PM_InResponse = (targetHourChile === 15 && targetMinuteChile === 0 && 
-                                              (targetDateIdentifierForSlotFilter === TOMORROW_DATE_IDENTIFIER_CHILE || 
-                                              (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE ) ) );
-
         const requestedSlotExactMatch = availableSlotsOutput.find(slotString => {
-            if (isTargetingThursday3PM_InResponse) {
+            const isTargetingThursday3PM_InFind = (targetHourChile === 15 && targetMinuteChile === 0 && 
+                                                  (targetDateIdentifierForSlotFilter === TOMORROW_DATE_IDENTIFIER_CHILE || 
+                                                  (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE ) ) );
+            if (isTargetingThursday3PM_InFind) {
                 console.log(`🔍 DEBUG FIND CB [Slot String]: "${slotString}" (length: ${slotString.length})`);
             }
-            // Normalizar espacios múltiples y NBSP a un solo espacio normal.
-            const normalizedSlotString = slotString.replace(/[\s\u00A0]+/g, ' ');
-            // Regex ajustado: \d{1,2} para la hora, espera un solo espacio \s, y hace los puntos de a.m./p.m. opcionales.
+            const normalizedSlotString = slotString.replace(/[\s\u00A0\u202F]+/g, ' '); // Abarcar más tipos de espacio
             const timePartMatch = normalizedSlotString.match(/(\d{1,2}:\d{2})\s(a\.?m\.?|p\.?m\.?)/i); 
             
-            if (isTargetingThursday3PM_InResponse) {
+            if (isTargetingThursday3PM_InFind) {
                 console.log(`🔍 DEBUG FIND CB: Normalized string for regex: "${normalizedSlotString}"`);
-                console.log(`🔍 DEBUG FIND CB: timePartMatch:`, timePartMatch);
+                console.log(`🔍 DEBUG FIND CB: timePartMatch (using /(\\d{1,2}:\\d{2})\\s(a\\.?m\\.?|p\\.?m\\.?)/i ):`, timePartMatch);
             }
 
             if (timePartMatch) {
@@ -643,7 +642,7 @@ export default async function handler(req, res) {
                 let [slotH, slotM] = slotHourMin.split(':').map(Number); 
                 const slotPeriod = timePartMatch[2] ? timePartMatch[2].toLowerCase().replace(/\./g, '').trim() : null;
 
-                if (isTargetingThursday3PM_InResponse) {
+                if (isTargetingThursday3PM_InFind) {
                     console.log(`🔍 DEBUG FIND CB: slotH=${slotH}, slotM=${slotM}, slotPeriod="${slotPeriod}" (original from regex: "${timePartMatch[2]}")`);
                 }
                 
@@ -652,16 +651,16 @@ export default async function handler(req, res) {
                     if (slotPeriod === 'am' && slotH === 12) slotH = 0; 
                 }
 
-                if (isTargetingThursday3PM_InResponse) {
+                if (isTargetingThursday3PM_InFind) {
                     console.log(`🔍 DEBUG FIND CB: slotH convertido=${slotH}. Comparando con targetHourChile=${targetHourChile}`);
                 }
                 const match = (slotH === targetHourChile && slotM === targetMinuteChile);
-                if (isTargetingThursday3PM_InResponse) {
+                if (isTargetingThursday3PM_InFind) {
                      console.log(`🔍 DEBUG FIND CB: Resultado de la comparación: ${match}`);
                 }
                 return match;
             }
-            if (isTargetingThursday3PM_InResponse) {
+            if (isTargetingThursday3PM_InFind) {
                 console.log(`🔍 DEBUG FIND CB: timePartMatch fue null para "${normalizedSlotString}".`);
             }
             return false;
@@ -714,7 +713,6 @@ export default async function handler(req, res) {
             }
             replyCalendar += ` ¿Te animas a que busquemos en otra fecha u horario?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)}`;
         }
-// ... (resto del código SIN CAMBIOS DESDE AQUÍ) ...
       } else if (availableSlotsOutput.length > 0) { 
         let intro = `¡Buenas noticias! 🎉 Encontré estas horitas disponibles`;
         if (targetDateForDisplay) {
@@ -831,10 +829,22 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error(`❌ Error en Rigbot para clientId ${requestClientId}:`, error.message, error.stack);
     const errorForUser = 'Ocurrió un error inesperado en Rigbot. Por favor, intenta más tarde.';
-    if (typeof logRigbotMessage === "function") { try { await logRigbotMessage({ role: "assistant", content: `Error interno: ${error.message}. UserMsg: ${errorForUser}`, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } catch(e){console.error("Log Error:",e)} }
+    if (typeof logRigbotMessage === "function") { 
+        try { 
+            await logRigbotMessage({ 
+                role: "assistant", 
+                content: `Error interno: ${error.message}. UserMsg: ${errorForUser}`, 
+                sessionId: currentSessionId, 
+                ip: ipAddress, 
+                clientId: requestClientId 
+            }); 
+        } catch(eLogging){ 
+            console.error("Error al loguear el error final:", eLogging);
+        } 
+    }
     return res.status(500).json({ 
         error: errorForUser, 
         details: process.env.NODE_ENV === 'development' ? error.message + (error.stack ? `\nStack: ${error.stack.substring(0,500)}...` : '') : undefined 
     });
-  }
+  } 
 }
