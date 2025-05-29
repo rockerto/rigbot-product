@@ -320,8 +320,7 @@ export default async function handler(req, res) {
         if (isJustTomorrowDayQuery || !dayKeywordFound) { 
             targetDateForDisplay = new Date(refDateForTargetCalc);
             targetDateForDisplay.setUTCDate(targetDateForDisplay.getUTCDate() + 1);
-        } else if (dayKeywordFound && targetDateForDisplay === null) { // Si había un día (ej. viernes) y se dijo "en la mañana", targetDateForDisplay ya debería estar seteado a viernes.
-            // Si no se seteó, algo raro pasó, default a mañana podría ser incorrecto.
+        } else if (dayKeywordFound && targetDateForDisplay === null) { 
              console.log("DEBUG: 'mañana' (palabra) presente pero targetDateForDisplay no se seteó y dayKeywordFound era true. Revisar lógica.");
         }
       } else if (isAnyNextWeekIndicator) { 
@@ -494,11 +493,10 @@ export default async function handler(req, res) {
         const currentDayProcessingIdentifierChile = getDayIdentifier(currentDayProcessingUtcStart, 'America/Santiago');
         
         const isCurrentDayTomorrow = currentDayProcessingIdentifierChile === TOMORROW_DATE_IDENTIFIER_CHILE;
-        // Variable para saber si estamos debuggeando EL slot problemático (Jueves 3pm)
         let isDebuggingThisSpecificSlotIteration = false; 
 
         if (targetHourChile === 15 && targetMinuteChile === 0 && isCurrentDayTomorrow) {
-            isDebuggingThisSpecificSlotIteration = true; // Activa logs especiales para Jueves 3pm
+            isDebuggingThisSpecificSlotIteration = true; 
             console.log(`\n🔍 DEBUGGING "MAÑANA JUEVES 3PM" SLOT PROCESSING (ClientId: ${requestClientId}):`);
             console.log(`   Current Day (Chile): ${currentDayProcessingIdentifierChile}, Slot Time (Chile) being checked: 15:00`);
             console.log(`   User's Target Hour/Minute (Chile): ${targetHourChile}:${targetMinuteChile}`);
@@ -557,7 +555,7 @@ export default async function handler(req, res) {
                 if (busyStart.getUTCFullYear() === currentDayProcessingUtcStart.getUTCFullYear() &&
                     busyStart.getUTCMonth() === currentDayProcessingUtcStart.getUTCMonth() &&
                     busyStart.getUTCDate() === currentDayProcessingUtcStart.getUTCDate()) {
-                    // slotStartUtc aquí es el slot de las 15:00 (Jueves)
+                    // Usar slotStartUtc y slotEndUtc del slot actual de 15:00 que estamos debuggeando
                     if (slotStartUtc.getTime() < busyEnd.getTime() && slotEndUtc.getTime() > busyStart.getTime()) {
                          console.log(`     - RELEVANTE Busy (para el slot ${hChile}:${mChile}): ${busyStart.toISOString()} to ${busyEnd.toISOString()}`);
                     }
@@ -616,18 +614,54 @@ export default async function handler(req, res) {
         specificTimeQueryFormattedForMsg += `${new Intl.DateTimeFormat('es-CL', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Santiago' }).format(displayDateForMsg)} `;
         specificTimeQueryFormattedForMsg += `a las ${targetHourChile.toString().padStart(2,'0')}:${targetMinuteChile.toString().padStart(2,'0')}`;
 
-        const requestedSlotExactMatch = availableSlotsOutput.find(slot => {
-            const timePartMatch = slot.match(/(\d{2}:\d{2})\s*(a\. m\.|p\. m\.)/i); 
+        const requestedSlotExactMatch = availableSlotsOutput.find(slotString => {
+            const isTargetingThursday3PM_InFind = (targetHourChile === 15 && targetMinuteChile === 0 && 
+                                                  (targetDateIdentifierForSlotFilter === TOMORROW_DATE_IDENTIFIER_CHILE || 
+                                                  (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE ) ) );
+            if (isTargetingThursday3PM_InFind) {
+                console.log(`🔍 DEBUG FIND CB [Slot String]: "${slotString}"`);
+            }
+            const timePartMatch = slotString.match(/(\d{2}:\d{2})\s*(a\. ?m\.?|p\. ?m\.?)/i); 
+            
+            if (isTargetingThursday3PM_InFind) {
+                console.log(`🔍 DEBUG FIND CB: timePartMatch:`, timePartMatch);
+            }
+
             if (timePartMatch) {
                 const slotHourMin = timePartMatch[1]; 
                 let [slotH, slotM] = slotHourMin.split(':').map(Number); 
-                const slotPeriod = timePartMatch[2].toLowerCase(); 
-                if (slotPeriod.includes('p. m.') && slotH >= 1 && slotH <= 11) slotH += 12; 
-                if (slotPeriod.includes('a. m.') && slotH === 12) slotH = 0; 
-                return slotH === targetHourChile && slotM === targetMinuteChile;
+                const slotPeriod = timePartMatch[2] ? timePartMatch[2].toLowerCase().replace(/\./g, '') : null; 
+
+                if (isTargetingThursday3PM_InFind) {
+                    console.log(`🔍 DEBUG FIND CB: slotH=${slotH}, slotM=${slotM}, slotPeriod="${slotPeriod}" (original from regex: "${timePartMatch[2]}")`);
+                }
+                
+                if (slotPeriod) { 
+                    if (slotPeriod.includes('pm') && slotH >= 1 && slotH <= 11) slotH += 12; 
+                    if (slotPeriod.includes('am') && slotH === 12) slotH = 0; 
+                }
+
+                if (isTargetingThursday3PM_InFind) {
+                    console.log(`🔍 DEBUG FIND CB: slotH convertido=${slotH}. Comparando con targetHourChile=${targetHourChile}`);
+                }
+                const match = (slotH === targetHourChile && slotM === targetMinuteChile);
+                if (isTargetingThursday3PM_InFind) {
+                     console.log(`🔍 DEBUG FIND CB: Resultado de la comparación: ${match}`);
+                }
+                return match;
+            }
+            if (isTargetingThursday3PM_InFind) {
+                console.log(`🔍 DEBUG FIND CB: timePartMatch fue null para "${slotString}".`);
             }
             return false;
         });
+        
+        const isTargetingThursday3PM_AfterFind = (targetHourChile === 15 && targetMinuteChile === 0 && 
+                                                (targetDateIdentifierForSlotFilter === TOMORROW_DATE_IDENTIFIER_CHILE || 
+                                                (targetDateForDisplay && getDayIdentifier(targetDateForDisplay, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE ) ) );
+        if (isTargetingThursday3PM_AfterFind) {
+            console.log("🔍 DEBUG FIND: Resultado de requestedSlotExactMatch:", requestedSlotExactMatch);
+        }
 
         if (requestedSlotExactMatch) { 
           replyCalendar = `¡Excelente! 🎉 Justo el ${requestedSlotExactMatch} está libre para ti.${getWhatsappDerivationSuffix(effectiveConfig.whatsappNumber)} 😉`;
@@ -637,7 +671,6 @@ export default async function handler(req, res) {
             const dayToSearchAlternatives = targetDateForDisplay || refDateForTargetCalc;
 
             if (dayToSearchAlternatives) {
-                // Condición para loguear la búsqueda de alternativas solo para el caso Jueves 3pm o en desarrollo
                 const shouldLogAlternativesSearch = (targetHourChile === 15 && targetMinuteChile === 0 && 
                                                     (getDayIdentifier(dayToSearchAlternatives, 'America/Santiago') === TOMORROW_DATE_IDENTIFIER_CHILE)) 
                                                     || process.env.NODE_ENV === 'development';
@@ -674,6 +707,7 @@ export default async function handler(req, res) {
             replyCalendar += ` ¿Te animas a que busquemos en otra fecha u horario?${getWhatsappContactMessage(effectiveConfig.whatsappNumber)}`;
         }
       } else if (availableSlotsOutput.length > 0) { 
+// ... (resto del código SIN CAMBIOS DESDE AQUÍ) ...
         let intro = `¡Buenas noticias! 🎉 Encontré estas horitas disponibles`;
         if (targetDateForDisplay) {
           if (isGenericNextWeekSearch) { 
