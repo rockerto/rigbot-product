@@ -1,30 +1,26 @@
 // rigbot-product/public/rigbot-widget-core.js
 (() => {
-  // Determinación de la URL del Backend
   const PRODUCTION_CHAT_API_URL = 'https://rigbot-product.vercel.app/api/chat';
   const LOCAL_CHAT_API_URL = 'http://localhost:3001/api/chat'; 
   const IS_RIGSITE_WEB_RUNNING_LOCALLY = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
   let backendUrl;
 
-  // Priorizar la variable de entorno global si está definida por el script de carga
   if (window.NEXT_PUBLIC_RIGBOT_BACKEND_URL) {
     backendUrl = window.NEXT_PUBLIC_RIGBOT_BACKEND_URL; 
-    // Asegurarse que la URL base termine para añadir /api/chat si no está ya
     if (!backendUrl.endsWith('/api/chat')) { 
         if(backendUrl.endsWith('/')) backendUrl += 'api/chat';
         else backendUrl += '/api/chat';
     }
     console.log("--- Rigbot Widget (vPureJS) --- Usando NEXT_PUBLIC_RIGBOT_BACKEND_URL para chat:", backendUrl);
   } else if (IS_RIGSITE_WEB_RUNNING_LOCALLY) {
-    backendUrl = LOCAL_CHAT_API_URL; // Fallback para cuando rigsite-web corre localmente
+    backendUrl = LOCAL_CHAT_API_URL;
     console.log("--- Rigbot Widget (vPureJS) --- rigsite-web en localhost, API objetivo (local de rigbot-product):", backendUrl);
   } else {
-    backendUrl = PRODUCTION_CHAT_API_URL; // Fallback para producción
+    backendUrl = PRODUCTION_CHAT_API_URL;
     console.log("--- Rigbot Widget (vPureJS) --- rigsite-web en producción, API objetivo (prod de rigbot-product):", backendUrl);
   }
   console.log("--- Rigbot Widget (vPureJS) --- Script EJECUTÁNDOSE.");
 
-  // Estado del Widget
   let chatBubbleElement = null;
   let whatsappBubbleElement = null;
   let chatWindowElement = null;
@@ -173,8 +169,11 @@
     window.rigbotConversationHistory.push({ role: "assistant", content: welcomeMessageFromConfig });
 
     const inputField = document.getElementById('rigbot-input-custom');
-    if (inputField) (inputField as HTMLInputElement).focus(); // Type assertion para el focus
-    else console.error("--- Rigbot Widget ERROR --- openChatWindow(): No se encontró 'rigbot-input-custom' para hacer focus.");
+    if (inputField) { // CORREGIDO: No más 'as HTMLInputElement' aquí directamente
+        inputField.focus(); 
+    } else {
+        console.error("--- Rigbot Widget ERROR --- openChatWindow(): No se encontró 'rigbot-input-custom' para hacer focus.");
+    }
   };
 
   const closeChatWindow = () => {
@@ -241,7 +240,6 @@
     const claveFromWindow = window.RIGBOT_CLAVE || null; 
     console.log("--- Rigbot Widget DEBUG --- sendMessage(): ClientID:", currentClientId, "Clave:", claveFromWindow ? "Presente" : "Ausente");
 
-    // CORRECCIÓN: Quitar 'as HTMLInputElement'
     const inputElement = document.getElementById('rigbot-input-custom'); 
     
     if (!inputElement) {
@@ -251,7 +249,7 @@
       return;
     }
 
-    // Para asegurar que value exista, casteamos a HTMLInputElement después de la verificación
+    // Es seguro asumir que es un HTMLInputElement si no es null
     const text = (inputElement as HTMLInputElement).value.trim(); 
     
     if (!text) {
@@ -262,8 +260,8 @@
     }
 
     addMessageToChat(text, 'user');
-    (inputElement as HTMLInputElement).value = ''; // Castear aquí también
-    (inputElement as HTMLInputElement).focus();   // Y aquí
+    (inputElement as HTMLInputElement).value = ''; 
+    (inputElement as HTMLInputElement).focus();   
     addMessageToChat('', 'bot', true);
 
     window.rigbotConversationHistory.push({ role: "user", content: text });
