@@ -1,23 +1,25 @@
 // rigbot-product/public/rigbot-widget-core.js
 (() => {
-  // Determinación de la URL del Backend (sin cambios)
+  // Determinación de la URL del Backend
   const PRODUCTION_CHAT_API_URL = 'https://rigbot-product.vercel.app/api/chat';
   const LOCAL_CHAT_API_URL = 'http://localhost:3001/api/chat'; 
   const IS_RIGSITE_WEB_RUNNING_LOCALLY = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
   let backendUrl;
 
+  // Priorizar la variable de entorno global si está definida por el script de carga
   if (window.NEXT_PUBLIC_RIGBOT_BACKEND_URL) {
-    backendUrl = window.NEXT_PUBLIC_RIGBOT_BACKEND_URL; // Usa la variable de entorno si está disponible
-    if (!backendUrl.endsWith('/api/chat')) { // Asegurarse que la URL base termine para añadir /api/chat
+    backendUrl = window.NEXT_PUBLIC_RIGBOT_BACKEND_URL; 
+    // Asegurarse que la URL base termine para añadir /api/chat si no está ya
+    if (!backendUrl.endsWith('/api/chat')) { 
         if(backendUrl.endsWith('/')) backendUrl += 'api/chat';
         else backendUrl += '/api/chat';
     }
     console.log("--- Rigbot Widget (vPureJS) --- Usando NEXT_PUBLIC_RIGBOT_BACKEND_URL para chat:", backendUrl);
   } else if (IS_RIGSITE_WEB_RUNNING_LOCALLY) {
-    backendUrl = LOCAL_CHAT_API_URL;
+    backendUrl = LOCAL_CHAT_API_URL; // Fallback para cuando rigsite-web corre localmente
     console.log("--- Rigbot Widget (vPureJS) --- rigsite-web en localhost, API objetivo (local de rigbot-product):", backendUrl);
   } else {
-    backendUrl = PRODUCTION_CHAT_API_URL;
+    backendUrl = PRODUCTION_CHAT_API_URL; // Fallback para producción
     console.log("--- Rigbot Widget (vPureJS) --- rigsite-web en producción, API objetivo (prod de rigbot-product):", backendUrl);
   }
   console.log("--- Rigbot Widget (vPureJS) --- Script EJECUTÁNDOSE.");
@@ -27,10 +29,7 @@
   let whatsappBubbleElement = null;
   let chatWindowElement = null;
   window.rigbotConversationHistory = window.rigbotConversationHistory || [];
-  
-  // ========= NUEVA VARIABLE PARA EL ESTADO DE SESIÓN DE CAPTURA DE LEADS =========
   let currentSessionStateForLeadCapture = null; 
-  // ===========================================================================
 
   const initRigbot = () => {
     console.log("--- Rigbot Widget DEBUG --- initRigbot() FUE LLAMADA ---");
@@ -75,9 +74,8 @@
       whatsappBubbleElement = document.createElement('a');
       whatsappBubbleElement.id = 'rigbot-bubble-whatsapp-custom';
       
-      // Intentar obtener el número de WhatsApp de la configuración del cliente, si está disponible globalmente
-      const whatsappNumberFromConfig = window.RIGBOT_WHATSAPP_NUMBER || "+56989967350"; // Fallback a tu número
-      whatsappBubbleElement.href = `https://wa.me/${whatsappNumberFromConfig.replace(/\D/g, '')}`; // Limpiar no dígitos
+      const whatsappNumberFromConfig = window.RIGBOT_WHATSAPP_NUMBER || "+56989967350"; 
+      whatsappBubbleElement.href = `https://wa.me/${whatsappNumberFromConfig.replace(/\D/g, '')}`; 
       
       whatsappBubbleElement.target = "_blank";
       whatsappBubbleElement.setAttribute('aria-label', 'Contactar por WhatsApp');
@@ -118,11 +116,9 @@
     }
     console.log("--- Rigbot Widget DEBUG --- openChatWindow(): 'rigbot-window-custom' no existe, procediendo a crearla.");
 
-    // ========= RESETEAR ESTADO DE CAPTURA DE LEADS AL ABRIR LA VENTANA =========
     currentSessionStateForLeadCapture = null; 
-    window.rigbotConversationHistory = []; // También resetear historial para una nueva "sesión" de chat
+    window.rigbotConversationHistory = []; 
     console.log("--- Rigbot Widget DEBUG --- openChatWindow(): sessionState y conversationHistory reseteados.");
-    // =======================================================================
 
     chatWindowElement = document.createElement('div');
     chatWindowElement.id = 'rigbot-window-custom';
@@ -172,13 +168,13 @@
       }
     });
     
-    // Usar el welcomeMessage de la configuración del cliente si está disponible
     const welcomeMessageFromConfig = window.RIGBOT_WELCOME_MESSAGE || "Hola 👋 Soy Rigbot, tu asistente virtual. ¿En qué puedo ayudarte hoy?";
     addMessageToChat(welcomeMessageFromConfig, 'bot');
-    window.rigbotConversationHistory.push({ role: "assistant", content: welcomeMessageFromConfig }); // Añadir al historial
+    window.rigbotConversationHistory.push({ role: "assistant", content: welcomeMessageFromConfig });
 
     const inputField = document.getElementById('rigbot-input-custom');
-    if (inputField) inputField.focus(); else console.error("--- Rigbot Widget ERROR --- openChatWindow(): No se encontró 'rigbot-input-custom' para hacer focus.");
+    if (inputField) (inputField as HTMLInputElement).focus(); // Type assertion para el focus
+    else console.error("--- Rigbot Widget ERROR --- openChatWindow(): No se encontró 'rigbot-input-custom' para hacer focus.");
   };
 
   const closeChatWindow = () => {
@@ -245,7 +241,8 @@
     const claveFromWindow = window.RIGBOT_CLAVE || null; 
     console.log("--- Rigbot Widget DEBUG --- sendMessage(): ClientID:", currentClientId, "Clave:", claveFromWindow ? "Presente" : "Ausente");
 
-    const inputElement = document.getElementById('rigbot-input-custom') as HTMLInputElement; // Type assertion
+    // CORRECCIÓN: Quitar 'as HTMLInputElement'
+    const inputElement = document.getElementById('rigbot-input-custom'); 
     
     if (!inputElement) {
       console.error("--- Rigbot Widget ERROR --- sendMessage(): inputElement 'rigbot-input-custom' NO ENCONTRADO ---");
@@ -254,7 +251,8 @@
       return;
     }
 
-    const text = inputElement.value.trim();
+    // Para asegurar que value exista, casteamos a HTMLInputElement después de la verificación
+    const text = (inputElement as HTMLInputElement).value.trim(); 
     
     if (!text) {
       console.log("--- Rigbot Widget DEBUG --- sendMessage(): Texto vacío, no se envía nada.");
@@ -264,26 +262,23 @@
     }
 
     addMessageToChat(text, 'user');
-    inputElement.value = '';
-    inputElement.focus();
+    (inputElement as HTMLInputElement).value = ''; // Castear aquí también
+    (inputElement as HTMLInputElement).focus();   // Y aquí
     addMessageToChat('', 'bot', true);
 
     window.rigbotConversationHistory.push({ role: "user", content: text });
-    // console.log("Historial enviado:", window.rigbotConversationHistory); // DEBUG
 
     console.log("📦 Enviando a API con clientId:", currentClientId, "y clave", (claveFromWindow ? "presente" : "ausente") ,"a URL:", backendUrl);
     
-    // ========= PAYLOAD MODIFICADO PARA INCLUIR SESSIONSTATE =========
     const payload = {
         message: text,
         clientId: currentClientId,
         clave: claveFromWindow,
-        sessionId: window.RIGBOT_SESSION_ID || `widget_session_${Date.now()}`, // Usar o generar sessionId
+        sessionId: window.RIGBOT_SESSION_ID || `widget_session_${Date.now()}`, 
         conversationHistory: window.rigbotConversationHistory,
-        sessionState: currentSessionStateForLeadCapture // Enviar el estado actual
+        sessionState: currentSessionStateForLeadCapture 
     };
-    // =================================================================
-
+    
     try {
       const response = await fetch(backendUrl, {
         method: 'POST',
@@ -305,13 +300,11 @@
       const data = await response.json();
       const botResponseText = data.response || 'Lo siento, no he podido procesar eso en este momento.';
       
-      // ========= GUARDAR EL NUEVO SESSIONSTATE DE LA RESPUESTA =========
       currentSessionStateForLeadCapture = data.sessionState;
       if (currentSessionStateForLeadCapture) {
         console.log("--- Rigbot Widget DEBUG --- sendMessage(): Nuevo sessionState recibido y guardado:", currentSessionStateForLeadCapture);
       }
-      // ==============================================================
-
+      
       addMessageToChat(botResponseText, 'bot');
       window.rigbotConversationHistory.push({ role: "assistant", content: botResponseText });
 
@@ -325,7 +318,6 @@
     }
   };
   
-  // Inicialización del widget
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     console.log("--- Rigbot Widget DEBUG --- document.readyState 'complete'/'interactive'. Llamando a initRigbot().");
     initRigbot();
