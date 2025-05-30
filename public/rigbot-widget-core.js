@@ -169,8 +169,8 @@
     window.rigbotConversationHistory.push({ role: "assistant", content: welcomeMessageFromConfig });
 
     const inputField = document.getElementById('rigbot-input-custom');
-    if (inputField) { // CORREGIDO: No más 'as HTMLInputElement' aquí directamente
-        inputField.focus(); 
+    if (inputField) {
+        inputField.focus(); // CORREGIDO: No 'as HTMLInputElement'
     } else {
         console.error("--- Rigbot Widget ERROR --- openChatWindow(): No se encontró 'rigbot-input-custom' para hacer focus.");
     }
@@ -249,8 +249,10 @@
       return;
     }
 
-    // Es seguro asumir que es un HTMLInputElement si no es null
-    const text = (inputElement as HTMLInputElement).value.trim(); 
+    // CORREGIDO: Acceder a .value y .focus() asumiendo que es un input, o hacer un type check si es necesario
+    // Dado que este es un script .js para el navegador, no podemos usar aserciones de tipo TS.
+    // Se asume que getElementById devuelve un elemento que tiene .value y .focus si no es null.
+    const text = inputElement.value.trim(); 
     
     if (!text) {
       console.log("--- Rigbot Widget DEBUG --- sendMessage(): Texto vacío, no se envía nada.");
@@ -260,8 +262,8 @@
     }
 
     addMessageToChat(text, 'user');
-    (inputElement as HTMLInputElement).value = ''; 
-    (inputElement as HTMLInputElement).focus();   
+    inputElement.value = ''; 
+    inputElement.focus();   
     addMessageToChat('', 'bot', true);
 
     window.rigbotConversationHistory.push({ role: "user", content: text });
