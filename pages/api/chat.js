@@ -1,24 +1,16 @@
-// /pages/api/chat.js
-import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager';
-import validateRequest from '@/lib/chat_modules/request_validator'; // <--- CAMBIO AQUÍ
-import { getCalendarInstance } from '@/lib/chat_modules/calendar_client_provider';
-import { CHILE_UTC_OFFSET_HOURS, getDayIdentifier } from '@/lib/chat_modules/dateTimeUtils';
-import { 
-    isCalendarQuery, 
-    parseDateTimeQuery, 
-    testFunctionDTP 
-} from '@/lib/chat_modules/date_time_parser'; 
-import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator';
-import { buildCalendarResponse } from '@/lib/chat_modules/response_builder';
-import { getOpenAIReply } from '@/lib/chat_modules/openai_handler';
-import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager'; 
+// /pages/api/chat.js (Orquestador con Lógica de Captura de Leads y Nuevos Logs)
+
+import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager.js';
+import { validateRequest } from '@/lib/chat_modules/request_validator.js';
+import { getCalendarInstance } from '@/lib/chat_modules/calendar_client_provider.js';
+import { CHILE_UTC_OFFSET_HOURS, getDayIdentifier } from '@/lib/chat_modules/dateTimeUtils.js';
+import { isCalendarQuery, parseDateTimeQuery } from '@/lib/chat_modules/date_time_parser.js'; // Removido testFunctionDTP si ya no se usa
+import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator.js';
+import { buildCalendarResponse } from '@/lib/chat_modules/response_builder.js';
+import { getOpenAIReply } from '@/lib/chat_modules/openai_handler.js';
+import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager.js'; 
 import { logRigbotMessage } from "@/lib/rigbotLog"; 
 import { db } from '@/lib/firebase-admin'; 
-
-// ... (el resto del archivo chat.js orquestador permanece IGUAL)
-// ... (asegúrate de pegar el resto del archivo que te di en la respuesta que comenzaba:
-//      "¡Absolutamente, capitán! Entendido al 100%. Nada de parches...")
-// ... hasta el final del archivo.
 
 const AFFIRMATIVE_LEAD_KEYWORDS = ["sí", "si", "ok", "dale", "bueno", "ya", "porfa", "acepto", "claro"];
 const NEGATIVE_LEAD_KEYWORDS = ["no", "no gracias", "ahora no"];
@@ -85,80 +77,8 @@ export default async function handler(req, res) {
   console.log("   clinicNameForLeadPrompt:", effectiveConfig.clinicNameForLeadPrompt);
   
   try {
-    const lowerMessage = message ? message.toLowerCase() : ""; // Asegurar que lowerMessage no sea undefined
-
-    // Llama a la función de prueba de date_time_parser.js si aún la tienes
-    // testFunctionDTP(); 
-    // console.log("DEBUG_ORCHESTRATOR: testFunctionDTP fue llamada.");
-
-    if (isCalendarQuery(lowerMessage)) {
-        const serverNowUtc = new Date();
-        const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
-        const currentMonthForRef = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1;
-        const currentDayForRef = parseInt(new Intl.DateTimeFormat('en-US', { day: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
-        const refDateTimestamp = Date.UTC(currentYearChile, currentMonthForRef, currentDayForRef, 0 - CHILE_UTC_OFFSET_HOURS, 0, 0, 0);
-        const refDateForTargetCalc = new Date(refDateTimestamp);
-
-        const queryDetails = parseDateTimeQuery(lowerMessage, effectiveConfig, serverNowUtc, refDateForTargetCalc, requestClientId);
-
-        if (queryDetails.earlyResponse) { 
-            botResponseText = queryDetails.earlyResponse.response;
-        } else {
-            const calendar = await getCalendarInstance(requestClientId, clientConfigData); 
-            if (!calendar) {
-                botResponseText = "Lo siento, estoy teniendo problemas para conectar con el servicio de calendario en este momento.";
-            } else {
-                let calendarQueryStartUtc;
-                if (queryDetails.targetDateForDisplay) { calendarQueryStartUtc = new Date(queryDetails.targetDateForDisplay.getTime());} 
-                else { calendarQueryStartUtc = new Date(refDateForTargetCalc.getTime()); } 
-                
-                if (!queryDetails.targetDateForDisplay && calendarQueryStartUtc < serverNowUtc && 
-                    getDayIdentifier(calendarQueryStartUtc, 'America/Santiago') === getDayIdentifier(serverNowUtc, 'America/Santiago')) {
-                      const tempTomorrow = new Date(refDateForTargetCalc);
-                      tempTomorrow.setUTCDate(tempTomorrow.getUTCDate() + 1);
-                      if (calendarQueryStartUtc < serverNowUtc ) { 
-                           const currentLocalHour = parseInt(new Intl.DateTimeFormat('en-US', {hour:'2-digit', hour12: false, timeZone:'America/Santiago'}).format(serverNowUtc));
-                           if (currentLocalHour >= 19) { 
-                              console.log("DEBUG (orquestador): Query genérica para hoy pero es tarde, iniciando búsqueda desde mañana.")
-                              calendarQueryStartUtc = tempTomorrow;
-                           }
-                      }
-                }
-                const calendarQueryEndUtc = new Date(calendarQueryStartUtc);
-                calendarQueryEndUtc.setUTCDate(calendarQueryStartUtc.getUTCDate() + effectiveConfig.calendarQueryDays);
-
-                let busySlots;
-                try {
-                    busySlots = await fetchBusySlots(calendar, calendarQueryStartUtc.toISOString(), calendarQueryEndUtc.toISOString(), requestClientId);
-                } catch (googleError) {
-                    console.error(`❌ ERROR en fetchBusySlots (orquestador) para ${requestClientId}:`, googleError.message);
-                    botResponseText = 'Error al consultar el calendario de Google.';
-                }
-                
-                if (busySlots) { 
-                    const availableSlotsOutput = getAvailableSlots(
-                        busySlots, queryDetails, effectiveConfig, 
-                        serverNowUtc, refDateForTargetCalc, 
-                        calendarQueryStartUtc, requestClientId
-                    );
-                    botResponseText = buildCalendarResponse(
-                        availableSlotsOutput, queryDetails, effectiveConfig, 
-                        serverNowUtc, refDateForTargetCalc, busySlots, 
-                        currentYearChile, requestClientId
-                    );
-                } else if (!botResponseText) { 
-                    botResponseText = "Hubo un problema obteniendo la disponibilidad del calendario.";
-                }
-            }
-        }
-    } else { 
-      botResponseText = await getOpenAIReply(message, effectiveConfig, requestClientId);
-    }
-
-    // --- INICIO LÓGICA DE CAPTURA DE LEADS (PARTE 1: PROCESAR ESTADO ACTUAL) ---
-    // Esta lógica se ejecuta DESPUÉS de obtener la respuesta normal del bot
-    // para que podamos AÑADIR la oferta de lead capture si aplica.
-    // O, si ya estamos en un flujo de lead capture, esta sección lo maneja y SOBREESCRIBE botResponseText.
+    const lowerMessage = message ? message.toLowerCase() : ""; 
+    let botResponseText = ""; 
     let leadCaptureFlowHandled = false; 
 
     if (sessionState.leadCapture.step && 
@@ -225,32 +145,90 @@ export default async function handler(req, res) {
         } else { 
             console.log("DEBUG (chat.js): Usuario ignoró oferta de lead, procede con su consulta.");
             sessionState.leadCapture.step = 'postponed_in_session'; 
-            leadCaptureFlowHandled = false; // Deja que el flujo normal procese la pregunta
-            // La respuesta original (botResponseText de calendario/OpenAI) se usará.
-            // La oferta de lead se hará de nuevo abajo si se cumplen las condiciones (pero no si step es postponed).
+            leadCaptureFlowHandled = false; 
         }
     }
 
-    // --- LÓGICA DE OFERTA DE LEAD CAPTURE (SI NO SE MANEJÓ ARRIBA) ---
-    if (!leadCaptureFlowHandled) {
+    if (!leadCaptureFlowHandled) { 
+        let primaryResponse = ""; // Variable para la respuesta principal
+        if (isCalendarQuery(lowerMessage)) {
+            const serverNowUtc = new Date();
+            const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
+            const currentMonthForRef = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1;
+            const currentDayForRef = parseInt(new Intl.DateTimeFormat('en-US', { day: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
+            const refDateTimestamp = Date.UTC(currentYearChile, currentMonthForRef, currentDayForRef, 0 - CHILE_UTC_OFFSET_HOURS, 0, 0, 0);
+            const refDateForTargetCalc = new Date(refDateTimestamp);
+
+            const queryDetails = parseDateTimeQuery(lowerMessage, effectiveConfig, serverNowUtc, refDateForTargetCalc, requestClientId);
+
+            if (queryDetails.earlyResponse) { 
+                primaryResponse = queryDetails.earlyResponse.response;
+            } else {
+                const calendar = await getCalendarInstance(requestClientId, clientConfigData); 
+                if (!calendar) {
+                    primaryResponse = "Lo siento, estoy teniendo problemas para conectar con el servicio de calendario en este momento.";
+                } else {
+                    let calendarQueryStartUtc;
+                    if (queryDetails.targetDateForDisplay) { calendarQueryStartUtc = new Date(queryDetails.targetDateForDisplay.getTime());} 
+                    else { calendarQueryStartUtc = new Date(refDateForTargetCalc.getTime()); } 
+                    
+                    if (!queryDetails.targetDateForDisplay && calendarQueryStartUtc < serverNowUtc && 
+                        getDayIdentifier(calendarQueryStartUtc, 'America/Santiago') === getDayIdentifier(serverNowUtc, 'America/Santiago')) {
+                          const tempTomorrow = new Date(refDateForTargetCalc);
+                          tempTomorrow.setUTCDate(tempTomorrow.getUTCDate() + 1);
+                          if (calendarQueryStartUtc < serverNowUtc ) { 
+                               const currentLocalHour = parseInt(new Intl.DateTimeFormat('en-US', {hour:'2-digit', hour12: false, timeZone:'America/Santiago'}).format(serverNowUtc));
+                               if (currentLocalHour >= 19) { 
+                                  console.log("DEBUG (orquestador): Query genérica para hoy pero es tarde, iniciando búsqueda desde mañana.")
+                                  calendarQueryStartUtc = tempTomorrow;
+                               }
+                          }
+                    }
+                    const calendarQueryEndUtc = new Date(calendarQueryStartUtc);
+                    calendarQueryEndUtc.setUTCDate(calendarQueryStartUtc.getUTCDate() + effectiveConfig.calendarQueryDays);
+
+                    let busySlots;
+                    try {
+                        busySlots = await fetchBusySlots(calendar, calendarQueryStartUtc.toISOString(), calendarQueryEndUtc.toISOString(), requestClientId);
+                    } catch (googleError) {
+                        console.error(`❌ ERROR en fetchBusySlots (orquestador) para ${requestClientId}:`, googleError.message);
+                        primaryResponse = 'Error al consultar el calendario de Google.';
+                    }
+                    
+                    if (busySlots) { 
+                        const availableSlotsOutput = getAvailableSlots(
+                            busySlots, queryDetails, effectiveConfig, 
+                            serverNowUtc, refDateForTargetCalc, 
+                            calendarQueryStartUtc, requestClientId
+                        );
+                        primaryResponse = buildCalendarResponse(
+                            availableSlotsOutput, queryDetails, effectiveConfig, 
+                            serverNowUtc, refDateForTargetCalc, busySlots, 
+                            currentYearChile, requestClientId
+                        );
+                    } else if (!primaryResponse) { 
+                        primaryResponse = "Hubo un problema obteniendo la disponibilidad del calendario.";
+                    }
+                }
+            }
+        } else { 
+          primaryResponse = await getOpenAIReply(message, effectiveConfig, requestClientId); 
+        }
+
+        botResponseText = primaryResponse; // Asignar la respuesta principal a botResponseText
+
         console.log("DEBUG_CHAT_HANDLER: Verificando si ofrecer lead capture. Current sessionState.leadCapture:", JSON.stringify(sessionState.leadCapture, null, 2), "Turn:", sessionState.turnCount);
         
         if (effectiveConfig.leadCaptureEnabled && 
-            (sessionState.leadCapture.step === null) && // Solo ofrecer si no estamos en ningún paso y no se ha pospuesto/declinado recientemente
+            (sessionState.leadCapture.step === null || sessionState.leadCapture.step === 'postponed_in_session') &&
             !sessionState.leadCapture.declinedInSession && 
             sessionState.turnCount <= 2 
         ) {
             const offerPrompt = effectiveConfig.leadCaptureOfferPromptTemplate?.replace("{clinicName}", effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica") 
                                 || `Si lo deseas, puedo tomar tus datos de contacto (nombre y email/teléfono) para que ${effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica"} se comunique contigo. ¿Te gustaría?`;
             
-            // Asegurarse de que botResponseText no esté vacío si es una consulta de OpenAI que no da respuesta útil
-            if (!botResponseText && lowerMessage) { // Si OpenAI no dio nada, pero hubo input
-                botResponseText = effectiveConfig.fallbackMessage || "No estoy seguro de cómo responder a eso.";
-            } else if (!botResponseText && !lowerMessage) { // Caso raro, sin input y sin respuesta
-                botResponseText = "Hola, ¿cómo puedo ayudarte?";
-            }
-
-            botResponseText += `\n\n${offerPrompt}`; 
+            botResponseText = (botResponseText || "") + `\n\n${offerPrompt}`; // Concatenar de forma segura
+            
             sessionState.leadCapture.step = 'offered';
             sessionState.leadCapture.offeredInTurn = sessionState.turnCount;
             console.log(`DEBUG_CHAT_HANDLER: Ofreciendo captura de lead en turno ${sessionState.turnCount}`);
@@ -266,8 +244,8 @@ export default async function handler(req, res) {
         } 
         catch (e) { console.error("Log Error (respuesta final):", e) } 
     } else {
-        if (conversationHistory[conversationHistory.length -1]?.role !== 'assistant' || conversationHistory[conversationHistory.length -1]?.content !== botResponseText) {
-            conversationHistory.push({ role: "assistant", content: botResponseText });
+        if (conversationHistory.length === 0 || conversationHistory[conversationHistory.length -1]?.role !== 'assistant' || conversationHistory[conversationHistory.length -1]?.content !== botResponseText) {
+             conversationHistory.push({ role: "assistant", content: botResponseText });
         }
     }
     
