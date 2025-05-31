@@ -1,28 +1,23 @@
-// /pages/api/chat.js (Orquestador con nuevo método de import para validateRequest)
-import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager';
-// import { validateRequest } from '@/lib/chat_modules/request_validator'; // <--- LÍNEA ANTIGUA COMENTADA
-import * as RequestValidatorModule from '@/lib/chat_modules/request_validator'; // <--- NUEVO IMPORT
-import { getCalendarInstance } from '@/lib/chat_modules/calendar_client_provider';
-import { CHILE_UTC_OFFSET_HOURS, getDayIdentifier } from '@/lib/chat_modules/dateTimeUtils';
-import { 
-    isCalendarQuery, 
-    parseDateTimeQuery
-} from '@/lib/chat_modules/date_time_parser'; 
-import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator';
-import { buildCalendarResponse } from '@/lib/chat_modules/response_builder';
-import { getOpenAIReply } from '@/lib/chat_modules/openai_handler';
-import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager'; 
+// /pages/api/chat.js (Orquestador con Opción 3 Híbrida para Lead Capture)
+
+import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager.js';
+import { validateRequest } from '@/lib/chat_modules/request_validator.js';
+import { getCalendarInstance } from '@/lib/chat_modules/calendar_client_provider.js';
+import { CHILE_UTC_OFFSET_HOURS, getDayIdentifier } from '@/lib/chat_modules/dateTimeUtils.js';
+import { isCalendarQuery, parseDateTimeQuery } from '@/lib/chat_modules/date_time_parser.js'; 
+import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator.js';
+import { buildCalendarResponse } from '@/lib/chat_modules/response_builder.js';
+import { getOpenAIReply } from '@/lib/chat_modules/openai_handler.js';
+import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager.js'; 
 import { logRigbotMessage } from "@/lib/rigbotLog"; 
 import { db } from '@/lib/firebase-admin'; 
 
-const AFFIRMATIVE_LEAD_KEYWORDS = ["sí", "si", "ok", "dale", "bueno", "ya", "porfa", "acepto", "claro"];
-const NEGATIVE_LEAD_KEYWORDS = ["no", "no gracias", "ahora no"];
+const AFFIRMATIVE_LEAD_KEYWORDS = ["sí", "si", "ok", "dale", "bueno", "ya", "porfa", "acepto", "claro", "sipi", "sip"];
+const NEGATIVE_LEAD_KEYWORDS = ["no", "no gracias", "ahora no", "después", "quizás más tarde"];
 
 
 export default async function handler(req, res) {
-  // Llamar a validateRequest usando el módulo importado
-  const validationResult = await RequestValidatorModule.validateRequest(req, res); // <--- NUEVA FORMA DE LLAMAR
-  
+  const validationResult = await validateRequest(req, res); 
   if (validationResult.handled) {
     return; 
   }
@@ -55,7 +50,7 @@ export default async function handler(req, res) {
   sessionState.turnCount = sessionState.turnCount + 1; 
   console.log("DEBUG_CHAT_HANDLER: Current sessionState (after potential init/increment):", JSON.stringify(sessionState, null, 2));
   
-  const conversationHistory = Array.isArray(incomingConversationHistory) ? incomingConversationHistory : [];
+  let conversationHistory = Array.isArray(incomingConversationHistory) ? incomingConversationHistory : [];
   
   if (typeof logRigbotMessage === "function" && message) { 
     try { 
@@ -83,10 +78,10 @@ export default async function handler(req, res) {
   
   try {
     const lowerMessage = message ? message.toLowerCase() : ""; 
-
     let botResponseText = ""; 
     let leadCaptureFlowHandled = false; 
 
+    // --- INICIO LÓGICA DE CAPTURA DE LEADS (PARTE 1: PROCESAR ESTADO ACTUAL) ---
     if (sessionState.leadCapture.step && 
         sessionState.leadCapture.step !== 'offered' && 
         sessionState.leadCapture.step !== 'completed_this_session' && 
@@ -139,17 +134,39 @@ export default async function handler(req, res) {
     } else if (sessionState.leadCapture.step === 'offered') {
         console.log("DEBUG_CHAT_HANDLER: Handling response to lead capture offer.");
         leadCaptureFlowHandled = true; 
-        const affirmativeMatch = AFFIRMATIVE_LEAD_KEYWORDS.some(k => lowerMessage.includes(k));
-        const negativeMatch = NEGATIVE_LEAD_KEYWORDS.some(k => lowerMessage.includes(k));
+        const affirmativeMatch = AFFIRMATIVE_LEAD_KEYWORDS.some(k => lowerMessage.startsWith(k + " ") || lowerMessage === k); // Más preciso
+        const negativeMatch = NEGATIVE_LEAD_KEYWORDS.some(k => lowerMessage.startsWith(k + " ") || lowerMessage === k);
 
-        if (affirmativeMatch && !negativeMatch) { 
+        let userNameFromMessage = null;
+        // Intento de extraer un nombre si no es un "sí" o "no" claro y no es una pregunta de calendario
+        if (!affirmativeMatch && !negativeMatch && !isCalendarQuery(lowerMessage) && lowerMessage.length > 1 && lowerMessage.length < 50 && !lowerMessage.includes("?")) { 
+            let potentialName = message; // Usar mensaje original para capitalización
+            const prefixes = ["soy ", "me llamo ", "mi nombre es "];
+            for (const prefix of prefixes) {
+                if (lowerMessage.startsWith(prefix)) {
+                    potentialName = message.substring(prefix.length).trim();
+                    break;
+                }
+            }
+            userNameFromMessage = potentialName.split(' ')
+                .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()) // Mejor capitalización
+                .join(' ');
+            console.log(`DEBUG_CHAT_HANDLER: Posible nombre extraído de la respuesta a la oferta: '${userNameFromMessage}'`);
+        }
+
+        if (userNameFromMessage) { 
+            sessionState.leadCapture.data.name = userNameFromMessage;
+            botResponseText = effectiveConfig.leadCaptureContactPromptTemplate?.replace("{userName}", userNameFromMessage) 
+                                || `Gracias, ${userNameFromMessage}. ¿Cuál es tu email o teléfono?`;
+            sessionState.leadCapture.step = 'awaiting_contact'; 
+        } else if (affirmativeMatch && !negativeMatch) { 
             botResponseText = effectiveConfig.leadCaptureNamePrompt || "¿Cuál es tu nombre?";
             sessionState.leadCapture.step = 'awaiting_name';
         } else if (negativeMatch) { 
             botResponseText = effectiveConfig.leadCaptureDeclinedMessage || "Entendido. Si cambias de opinión, solo avísame. ¿Cómo puedo ayudarte hoy con tus consultas o horarios?";
             sessionState.leadCapture.step = 'declined_this_session'; 
         } else { 
-            console.log("DEBUG (chat.js): Usuario ignoró oferta de lead, procede con su consulta.");
+            console.log("DEBUG (chat.js): Usuario ignoró/respondió ambiguamente a oferta de lead, procede con su consulta.");
             sessionState.leadCapture.step = 'postponed_in_session'; 
             leadCaptureFlowHandled = false; 
         }
@@ -157,7 +174,7 @@ export default async function handler(req, res) {
 
     if (!leadCaptureFlowHandled) { 
         let primaryResponse = ""; 
-        if (isCalendarQuery(lowerMessage)) { // Asegúrate que isCalendarQuery está bien importado y es una función
+        if (isCalendarQuery(lowerMessage)) {
             const serverNowUtc = new Date();
             const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
             const currentMonthForRef = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1;
@@ -230,10 +247,12 @@ export default async function handler(req, res) {
             !sessionState.leadCapture.declinedInSession && 
             sessionState.turnCount <= 2 
         ) {
-            const offerPrompt = effectiveConfig.leadCaptureOfferPromptTemplate?.replace("{clinicName}", effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica") 
-                                || `Si lo deseas, puedo tomar tus datos de contacto (nombre y email/teléfono) para que ${effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica"} se comunique contigo. ¿Te gustaría?`;
+            const clinicName = effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica";
+            const offerPrompt = (effectiveConfig.leadCaptureOfferPromptTemplate || 
+                                `Si lo deseas, puedo tomar tus datos de contacto (nombre y email/teléfono) para que {clinicName} se comunique contigo. ¿Te gustaría?`)
+                                .replace("{clinicName}", clinicName);
             
-            botResponseText = (botResponseText || "") + `\n\n${offerPrompt}`; 
+            botResponseText = (botResponseText || (effectiveConfig.fallbackMessage || "No estoy seguro de cómo responder a eso.")) + `\n\n${offerPrompt}`; 
             
             sessionState.leadCapture.step = 'offered';
             sessionState.leadCapture.offeredInTurn = sessionState.turnCount;
@@ -244,13 +263,14 @@ export default async function handler(req, res) {
     if (typeof logRigbotMessage === "function") { 
         try { 
             await logRigbotMessage({ role: "assistant", content: botResponseText, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); 
-            if (conversationHistory[conversationHistory.length -1]?.role !== 'assistant' || conversationHistory[conversationHistory.length -1]?.content !== botResponseText) {
+            // Solo añadir a este historial si no es el mismo que el último mensaje, para evitar duplicados si el widget ya lo hace
+            if (conversationHistory.length === 0 || conversationHistory[conversationHistory.length -1]?.role !== 'assistant' || conversationHistory[conversationHistory.length -1]?.content !== botResponseText) {
                 conversationHistory.push({ role: "assistant", content: botResponseText });
             }
         } 
         catch (e) { console.error("Log Error (respuesta final):", e) } 
     } else {
-        if (conversationHistory.length === 0 || conversationHistory[conversationHistory.length -1]?.role !== 'assistant' || conversationHistory[conversationHistory.length -1]?.content !== botResponseText) {
+         if (conversationHistory.length === 0 || conversationHistory[conversationHistory.length -1]?.role !== 'assistant' || conversationHistory[conversationHistory.length -1]?.content !== botResponseText) {
              conversationHistory.push({ role: "assistant", content: botResponseText });
         }
     }
@@ -274,11 +294,13 @@ export default async function handler(req, res) {
         console.error("Error al loguear el error final en handler principal:", eLogging);
       }
     }
-    console.log("DEBUG_CHAT_HANDLER: Outgoing sessionState (on error):", JSON.stringify(sessionState, null, 2)); 
+    // Asegurarse de que sessionState siempre se devuelva, incluso en error, para que el widget pueda mantener la cuenta de turnos.
+    const safeSessionStateOnError = sessionState || { leadCapture: { step: null, data: {}, offeredInTurn: null, declinedInSession: false }, turnCount: 0 };
+    console.log("DEBUG_CHAT_HANDLER: Outgoing sessionState (on error):", JSON.stringify(safeSessionStateOnError, null, 2)); 
     return res.status(500).json({
       error: errorForUser,
       details: process.env.NODE_ENV === 'development' ? error.message + (error.stack ? `\nStack: ${error.stack.substring(0, 500)}...` : '') : undefined,
-      sessionState 
+      sessionState: safeSessionStateOnError 
     });
   }
 }
