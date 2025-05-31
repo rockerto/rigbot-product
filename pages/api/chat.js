@@ -8,7 +8,7 @@ import { isCalendarQuery, parseDateTimeQuery, testFunctionDTP } from '@/lib/chat
 import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator.js';
 import { buildCalendarResponse } from '@/lib/chat_modules/response_builder.js';
 import { getOpenAIReply } from '@/lib/chat_modules/openai_handler.js';
-import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager.js';
+import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager.js'; 
 import { logRigbotMessage } from "@/lib/rigbotLog"; 
 import { db } from '@/lib/firebase-admin'; 
 
@@ -25,20 +25,21 @@ export default async function handler(req, res) {
   const clientConfigData = validationResult.clientConfigData || {}; 
   const requestData = validationResult.requestData || {};
   
-  // LOG NUEVO: Ver el body completo para asegurar que sessionState y conversationHistory llegan
-  console.log("DEBUG_CHAT_HANDLER: Full req.body:", JSON.stringify(req.body, null, 2));
-
+  // === INICIO DE CAMBIO EN EXTRACCIÓN Y LOGS ===
   const { 
     message, 
     sessionId: currentSessionId, 
     clientId: requestClientId, 
     ipAddress, 
-    sessionState: incomingSessionState, // Esperamos que el widget lo envíe
-    conversationHistory: incomingConversationHistory // Esperamos que el widget lo envíe
+    // sessionState y conversationHistory ahora vienen de requestData gracias a request_validator.js
+    sessionState: incomingSessionStateFromValidator, 
+    conversationHistory: incomingConversationHistoryFromValidator 
   } = requestData;
 
+  console.log("DEBUG_CHAT_HANDLER: Full requestData from validator:", JSON.stringify(requestData, null, 2));
+  // === FIN DE CAMBIO EN EXTRACCIÓN ===
 
-  let sessionState = incomingSessionState || { 
+  let sessionState = incomingSessionStateFromValidator || { 
     leadCapture: { 
         step: null, 
         data: { name: "", contactInfo: "", userMessage: "" }, 
@@ -47,24 +48,44 @@ export default async function handler(req, res) {
     },
     turnCount: 0 
   };
-  sessionState.turnCount = (sessionState.turnCount || 0) + 1;
-  console.log("DEBUG_CHAT_HANDLER: Incoming/Initialized sessionState:", JSON.stringify(sessionState, null, 2)); // LOG NUEVO
+  // Incrementar turnCount basado en el estado actual o inicializarlo
+  sessionState.turnCount = sessionState.turnCount + 1; // Ya no necesita el ( ... || 0) porque siempre estará inicializado
 
-  // Usar el historial de conversación que viene del request, o inicializarlo si no viene.
-  const conversationHistory = incomingConversationHistory || [];
-  if (conversationHistory.length === 0 && message) { // Si es el primer mensaje real
-    conversationHistory.push({role: "user", content: message});
-  } else if (conversationHistory.length > 0 && conversationHistory[conversationHistory.length -1].role === 'assistant' && message) {
-    // Asegurarse de no duplicar el último mensaje del usuario si ya está en un historial más completo
-    conversationHistory.push({role: "user", content: message});
+  console.log("DEBUG_CHAT_HANDLER: Current sessionState (after potential init/increment):", JSON.stringify(sessionState, null, 2));
+
+  // === INICIO DE CAMBIO EN MANEJO DE CONVERSATION HISTORY ===
+  // Usar el historial de conversación que viene del requestData (ya parseado por request_validator)
+  // o inicializarlo si no viene (aunque request_validator debería manejarlo).
+  const conversationHistory = Array.isArray(incomingConversationHistoryFromValidator) ? incomingConversationHistoryFromValidator : [];
+  
+  // El logRigbotMessage del mensaje del USUARIO ahora se hace aquí, después de toda validación inicial
+  // y antes de cualquier procesamiento de lógica de chat.
+  if (typeof logRigbotMessage === "function") { 
+    try { 
+        console.log(`DEBUG_CHAT_HANDLER: Logging user message to Firestore: "${message}"`);
+        await logRigbotMessage({ role: "user", content: message, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); 
+    } 
+    catch (logErr) { console.error("Error al loguear mensaje de usuario en Firestore (chat.js):", logErr); }
+  }
+  // Y el historial que se usa para lógica interna y se pasa a otros módulos
+  // ya debería tener el mensaje del usuario actual si el widget lo añadió correctamente.
+  // Si no, lo añadimos aquí para consistencia interna.
+  if (conversationHistory.length === 0 || conversationHistory[conversationHistory.length -1].role !== 'user' || conversationHistory[conversationHistory.length -1].content !== message) {
+      if(conversationHistory.length > 0 && conversationHistory[conversationHistory.length -1].role === 'user' && conversationHistory[conversationHistory.length -1].content === message){
+          // Ya está, no hacer nada.
+      } else {
+          console.log("DEBUG_CHAT_HANDLER: User message not found or last in history, adding to internal conversationHistory.");
+          conversationHistory.push({role: "user", content: message});
+      }
   }
+  console.log("DEBUG_CHAT_HANDLER: Current full conversationHistory for processing:", JSON.stringify(conversationHistory, null, 2));
+  // === FIN DE CAMBIO EN MANEJO DE CONVERSATION HISTORY ===
 
 
   const effectiveConfig = getEffectiveConfig(clientConfigData); 
-  // LOG NUEVO: Mostrar config relevante para lead capture
   console.log("🧠 Configuración efectiva usada (orquestador) para clientId", requestClientId, ":");
   console.log("   leadCaptureEnabled:", effectiveConfig.leadCaptureEnabled);
-  console.log("   leadCaptureOfferPromptTemplate:", effectiveConfig.leadCaptureOfferPromptTemplate);
+  console.log("   leadCaptureOfferPromptTemplate:", effectiveConfig.leadCaptureOfferPromptTemplate); // Puede ser largo
   console.log("   clinicNameForLeadPrompt:", effectiveConfig.clinicNameForLeadPrompt);
   
   try {
@@ -72,12 +93,11 @@ export default async function handler(req, res) {
     let botResponseText = "";
     let leadCaptureFlowHandled = false; 
 
-    // --- INICIO LÓGICA DE CAPTURA DE LEADS (PARTE 1: PROCESAR ESTADO ACTUAL) ---
     if (sessionState.leadCapture.step && 
         sessionState.leadCapture.step !== 'offered' && 
         sessionState.leadCapture.step !== 'completed_this_session' && 
         sessionState.leadCapture.step !== 'declined_this_session' &&
-        sessionState.leadCapture.step !== 'postponed_in_session' // Añadido para que no entre aquí si pospuso
+        sessionState.leadCapture.step !== 'postponed_in_session' 
     ) {
         console.log(`DEBUG_CHAT_HANDLER: Active lead capture step: ${sessionState.leadCapture.step}`);
         leadCaptureFlowHandled = true;
@@ -103,8 +123,7 @@ export default async function handler(req, res) {
                 };
 
                 try {
-                    // Asegurarse que conversationHistory aquí sea el historial COMPLETO hasta este punto.
-                    // El que viene en requestData.conversationHistory es el ideal.
+                    // Pasar el 'conversationHistory' actual que incluye el último mensaje del lead
                     await saveLeadToFirestore(requestClientId, leadDataToSave, conversationHistory); 
                     const clinicNameForEmail = effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la Clínica";
                     const notificationEmail = effectiveConfig.leadNotificationEmail || effectiveConfig.email;
@@ -142,9 +161,10 @@ export default async function handler(req, res) {
             leadCaptureFlowHandled = false; 
         }
     }
-    // --- FIN LÓGICA DE CAPTURA DE LEADS (PARTE 1) ---
 
     if (!leadCaptureFlowHandled) { 
+        // ... (resto de la lógica de isCalendarQuery, parseDateTimeQuery, etc. SIN CAMBIOS) ...
+        // ... (hasta el final del bloque if/else de OpenAI) ...
         if (isCalendarQuery(lowerMessage)) {
             const serverNowUtc = new Date();
             const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
@@ -209,13 +229,13 @@ export default async function handler(req, res) {
           botResponseText = await getOpenAIReply(message, effectiveConfig, requestClientId);
         }
 
-        // --- INICIO LÓGICA DE CAPTURA DE LEADS (PARTE 2: OFRECER SI APLICA) ---
-        console.log("DEBUG_CHAT_HANDLER: Verificando si ofrecer lead capture. Current sessionState.leadCapture:", JSON.stringify(sessionState.leadCapture, null, 2), "Turn:", sessionState.turnCount); // LOG NUEVO
+        // --- LÓGICA DE OFERTA DE LEAD CAPTURE ---
+        console.log("DEBUG_CHAT_HANDLER: Verificando si ofrecer lead capture. Current sessionState.leadCapture:", JSON.stringify(sessionState.leadCapture, null, 2), "Turn:", sessionState.turnCount);
         
         if (effectiveConfig.leadCaptureEnabled && 
-            (sessionState.leadCapture.step === null || sessionState.leadCapture.step === 'postponed_in_session') && // Ofrecer si no hay un flujo activo o si se pospuso
+            (sessionState.leadCapture.step === null || sessionState.leadCapture.step === 'postponed_in_session') &&
             !sessionState.leadCapture.declinedInSession && 
-            sessionState.turnCount <= 2 // Condición de ejemplo: ofrecer solo en los primeros 2 turnos si no se ha declinado antes
+            sessionState.turnCount <= 2 
         ) {
             const offerPrompt = effectiveConfig.leadCaptureOfferPromptTemplate?.replace("{clinicName}", effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica") 
                                 || `Si lo deseas, puedo tomar tus datos de contacto (nombre y email/teléfono) para que ${effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica"} se comunique contigo. ¿Te gustaría?`;
@@ -223,18 +243,26 @@ export default async function handler(req, res) {
             botResponseText += `\n\n${offerPrompt}`; 
             sessionState.leadCapture.step = 'offered';
             sessionState.leadCapture.offeredInTurn = sessionState.turnCount;
-            console.log(`DEBUG_CHAT_HANDLER: Ofreciendo captura de lead en turno ${sessionState.turnCount}`); // LOG NUEVO
+            console.log(`DEBUG_CHAT_HANDLER: Ofreciendo captura de lead en turno ${sessionState.turnCount}`);
         }
-        // --- FIN LÓGICA DE CAPTURA DE LEADS (PARTE 2) ---
     }
 
     if (typeof logRigbotMessage === "function") { 
-        try { await logRigbotMessage({ role: "assistant", content: botResponseText, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } 
+        try { 
+            // Loguear la respuesta final del bot ANTES de añadirla al historial que se devuelve al widget
+            await logRigbotMessage({ role: "assistant", content: botResponseText, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); 
+            // Añadir la respuesta del bot al historial que se devuelve para el siguiente turno
+            conversationHistory.push({ role: "assistant", content: botResponseText });
+        } 
         catch (e) { console.error("Log Error (respuesta final):", e) } 
+    } else {
+        // Si no hay logRigbotMessage, igual añadir al historial para el widget
+        conversationHistory.push({ role: "assistant", content: botResponseText });
     }
     
-    console.log("DEBUG_CHAT_HANDLER: Outgoing sessionState:", JSON.stringify(sessionState, null, 2)); // LOG NUEVO
-    return res.status(200).json({ response: botResponseText, sessionState });
+    console.log("DEBUG_CHAT_HANDLER: Outgoing sessionState:", JSON.stringify(sessionState, null, 2)); 
+    // Devolver el historial de conversación actualizado y el estado de sesión
+    return res.status(200).json({ response: botResponseText, sessionState, conversationHistory });
 
   } catch (error) {
     console.error(`❌ Error en Rigbot Handler Principal para clientId ${requestClientId}:`, error.message, error.stack);
@@ -252,7 +280,7 @@ export default async function handler(req, res) {
         console.error("Error al loguear el error final en handler principal:", eLogging);
       }
     }
-    console.log("DEBUG_CHAT_HANDLER: Outgoing sessionState (on error):", JSON.stringify(sessionState, null, 2)); // LOG NUEVO
+    console.log("DEBUG_CHAT_HANDLER: Outgoing sessionState (on error):", JSON.stringify(sessionState, null, 2)); 
     return res.status(500).json({
       error: errorForUser,
       details: process.env.NODE_ENV === 'development' ? error.message + (error.stack ? `\nStack: ${error.stack.substring(0, 500)}...` : '') : undefined,
