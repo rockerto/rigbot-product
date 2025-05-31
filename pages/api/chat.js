@@ -1,14 +1,17 @@
-// /pages/api/chat.js (Orquestador con Lógica de Captura de Leads y Nuevos Logs)
-
-import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager.js';
-import { validateRequest } from '@/lib/chat_modules/request_validator.js';
-import { getCalendarInstance } from '@/lib/chat_modules/calendar_client_provider.js';
-import { CHILE_UTC_OFFSET_HOURS, getDayIdentifier } from '@/lib/chat_modules/dateTimeUtils.js';
-import { isCalendarQuery, parseDateTimeQuery } from '@/lib/chat_modules/date_time_parser.js'; // Removido testFunctionDTP si ya no se usa
-import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator.js';
-import { buildCalendarResponse } from '@/lib/chat_modules/response_builder.js';
-import { getOpenAIReply } from '@/lib/chat_modules/openai_handler.js';
-import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager.js'; 
+// /pages/api/chat.js
+import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager';
+import { validateRequest } from '@/lib/chat_modules/request_validator'; // <--- CAMBIO AQUÍ (import nombrado)
+import { getCalendarInstance } from '@/lib/chat_modules/calendar_client_provider';
+import { CHILE_UTC_OFFSET_HOURS, getDayIdentifier } from '@/lib/chat_modules/dateTimeUtils';
+import { 
+    isCalendarQuery, 
+    parseDateTimeQuery
+    // testFunctionDTP ya no la necesitamos, la quito del import
+} from '@/lib/chat_modules/date_time_parser'; 
+import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator';
+import { buildCalendarResponse } from '@/lib/chat_modules/response_builder';
+import { getOpenAIReply } from '@/lib/chat_modules/openai_handler';
+import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager'; 
 import { logRigbotMessage } from "@/lib/rigbotLog"; 
 import { db } from '@/lib/firebase-admin'; 
 
@@ -74,10 +77,12 @@ export default async function handler(req, res) {
   const effectiveConfig = getEffectiveConfig(clientConfigData); 
   console.log("🧠 Configuración efectiva usada (orquestador) para clientId", requestClientId, ":");
   console.log("   leadCaptureEnabled:", effectiveConfig.leadCaptureEnabled);
+  // console.log("   leadCaptureOfferPromptTemplate:", effectiveConfig.leadCaptureOfferPromptTemplate);
   console.log("   clinicNameForLeadPrompt:", effectiveConfig.clinicNameForLeadPrompt);
   
   try {
     const lowerMessage = message ? message.toLowerCase() : ""; 
+
     let botResponseText = ""; 
     let leadCaptureFlowHandled = false; 
 
@@ -150,7 +155,7 @@ export default async function handler(req, res) {
     }
 
     if (!leadCaptureFlowHandled) { 
-        let primaryResponse = ""; // Variable para la respuesta principal
+        let primaryResponse = ""; 
         if (isCalendarQuery(lowerMessage)) {
             const serverNowUtc = new Date();
             const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
@@ -215,7 +220,7 @@ export default async function handler(req, res) {
           primaryResponse = await getOpenAIReply(message, effectiveConfig, requestClientId); 
         }
 
-        botResponseText = primaryResponse; // Asignar la respuesta principal a botResponseText
+        botResponseText = primaryResponse; 
 
         console.log("DEBUG_CHAT_HANDLER: Verificando si ofrecer lead capture. Current sessionState.leadCapture:", JSON.stringify(sessionState.leadCapture, null, 2), "Turn:", sessionState.turnCount);
         
@@ -227,7 +232,7 @@ export default async function handler(req, res) {
             const offerPrompt = effectiveConfig.leadCaptureOfferPromptTemplate?.replace("{clinicName}", effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica") 
                                 || `Si lo deseas, puedo tomar tus datos de contacto (nombre y email/teléfono) para que ${effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica"} se comunique contigo. ¿Te gustaría?`;
             
-            botResponseText = (botResponseText || "") + `\n\n${offerPrompt}`; // Concatenar de forma segura
+            botResponseText = (botResponseText || "") + `\n\n${offerPrompt}`; 
             
             sessionState.leadCapture.step = 'offered';
             sessionState.leadCapture.offeredInTurn = sessionState.turnCount;
