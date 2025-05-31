@@ -1,4 +1,4 @@
-// /pages/api/chat.js (Orquestador con Lógica de Captura de Leads)
+// /pages/api/chat.js (Orquestador con Lógica de Captura de Leads y Nuevos Logs)
 
 import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager.js';
 import { validateRequest } from '@/lib/chat_modules/request_validator.js';
@@ -8,11 +8,10 @@ import { isCalendarQuery, parseDateTimeQuery, testFunctionDTP } from '@/lib/chat
 import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator.js';
 import { buildCalendarResponse } from '@/lib/chat_modules/response_builder.js';
 import { getOpenAIReply } from '@/lib/chat_modules/openai_handler.js';
-import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager.js'; // NUEVO IMPORT
+import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager.js';
 import { logRigbotMessage } from "@/lib/rigbotLog"; 
 import { db } from '@/lib/firebase-admin'; 
 
-// Palabras clave afirmativas para captura de leads
 const AFFIRMATIVE_LEAD_KEYWORDS = ["sí", "si", "ok", "dale", "bueno", "ya", "porfa", "acepto", "claro"];
 const NEGATIVE_LEAD_KEYWORDS = ["no", "no gracias", "ahora no"];
 
@@ -25,68 +24,95 @@ export default async function handler(req, res) {
 
   const clientConfigData = validationResult.clientConfigData || {}; 
   const requestData = validationResult.requestData || {};
-  // Extraer sessionState del requestData; si no viene, inicializarlo.
-  const { message, sessionId: currentSessionId, clientId: requestClientId, ipAddress, sessionState: incomingSessionState } = requestData;
+  
+  // LOG NUEVO: Ver el body completo para asegurar que sessionState y conversationHistory llegan
+  console.log("DEBUG_CHAT_HANDLER: Full req.body:", JSON.stringify(req.body, null, 2));
+
+  const { 
+    message, 
+    sessionId: currentSessionId, 
+    clientId: requestClientId, 
+    ipAddress, 
+    sessionState: incomingSessionState, // Esperamos que el widget lo envíe
+    conversationHistory: incomingConversationHistory // Esperamos que el widget lo envíe
+  } = requestData;
+
 
   let sessionState = incomingSessionState || { 
     leadCapture: { 
         step: null, 
         data: { name: "", contactInfo: "", userMessage: "" }, 
         offeredInTurn: null,
-        declinedInSession: false // Para no volver a ofrecer si ya dijo que no explícitamente
+        declinedInSession: false 
     },
     turnCount: 0 
   };
   sessionState.turnCount = (sessionState.turnCount || 0) + 1;
+  console.log("DEBUG_CHAT_HANDLER: Incoming/Initialized sessionState:", JSON.stringify(sessionState, null, 2)); // LOG NUEVO
+
+  // Usar el historial de conversación que viene del request, o inicializarlo si no viene.
+  const conversationHistory = incomingConversationHistory || [];
+  if (conversationHistory.length === 0 && message) { // Si es el primer mensaje real
+    conversationHistory.push({role: "user", content: message});
+  } else if (conversationHistory.length > 0 && conversationHistory[conversationHistory.length -1].role === 'assistant' && message) {
+    // Asegurarse de no duplicar el último mensaje del usuario si ya está en un historial más completo
+    conversationHistory.push({role: "user", content: message});
+  }
+
 
   const effectiveConfig = getEffectiveConfig(clientConfigData); 
-  console.log("🧠 Configuración efectiva usada (orquestador) para clientId", requestClientId, ":", JSON.stringify(effectiveConfig, null, 2).substring(0, 300) + "...");
+  // LOG NUEVO: Mostrar config relevante para lead capture
+  console.log("🧠 Configuración efectiva usada (orquestador) para clientId", requestClientId, ":");
+  console.log("   leadCaptureEnabled:", effectiveConfig.leadCaptureEnabled);
+  console.log("   leadCaptureOfferPromptTemplate:", effectiveConfig.leadCaptureOfferPromptTemplate);
+  console.log("   clinicNameForLeadPrompt:", effectiveConfig.clinicNameForLeadPrompt);
   
-  // Log de la función de prueba de date_time_parser (si aún es necesario)
-  // const testResult = testFunctionDTP(); 
-  // console.log("DEBUG_ORCHESTRATOR: testFunctionDTP result:", testResult); 
-
   try {
     const lowerMessage = message.toLowerCase();
     let botResponseText = "";
-    let leadCaptureFlowHandled = false; // Flag para saber si el flujo de lead capture ya dio una respuesta
+    let leadCaptureFlowHandled = false; 
 
-    // --- INICIO LÓGICA DE CAPTURA DE LEADS ---
-
-    // 1. Procesar si estamos EN MEDIO de una captura de leads
-    if (sessionState.leadCapture.step && sessionState.leadCapture.step !== 'offered' && sessionState.leadCapture.step !== 'completed_this_session' && sessionState.leadCapture.step !== 'declined_this_session') {
+    // --- INICIO LÓGICA DE CAPTURA DE LEADS (PARTE 1: PROCESAR ESTADO ACTUAL) ---
+    if (sessionState.leadCapture.step && 
+        sessionState.leadCapture.step !== 'offered' && 
+        sessionState.leadCapture.step !== 'completed_this_session' && 
+        sessionState.leadCapture.step !== 'declined_this_session' &&
+        sessionState.leadCapture.step !== 'postponed_in_session' // Añadido para que no entre aquí si pospuso
+    ) {
+        console.log(`DEBUG_CHAT_HANDLER: Active lead capture step: ${sessionState.leadCapture.step}`);
         leadCaptureFlowHandled = true;
         switch (sessionState.leadCapture.step) {
             case 'awaiting_name':
-                sessionState.leadCapture.data.name = message; // Guardar el nombre
-                botResponseText = effectiveConfig.leadCaptureContactPromptTemplate?.replace("{userName}", message) || `Gracias, ${message}. ¿Cuál es tu email o teléfono?`;
+                sessionState.leadCapture.data.name = message; 
+                botResponseText = effectiveConfig.leadCaptureContactPromptTemplate?.replace("{userName}", message || "tú") || `Gracias, ${message || "tú"}. ¿Cuál es tu email o teléfono?`;
                 sessionState.leadCapture.step = 'awaiting_contact';
                 break;
             case 'awaiting_contact':
-                sessionState.leadCapture.data.contactInfo = message; // Guardar info de contacto
+                sessionState.leadCapture.data.contactInfo = message; 
                 botResponseText = effectiveConfig.leadCaptureMessagePrompt || "¿Algo más que quieras añadir (opcional)?";
                 sessionState.leadCapture.step = 'awaiting_message';
                 break;
             case 'awaiting_message':
-                sessionState.leadCapture.data.userMessage = message; // Guardar mensaje adicional
+                sessionState.leadCapture.data.userMessage = message; 
                 
                 const leadDataToSave = {
                     name: sessionState.leadCapture.data.name,
                     contactInfo: sessionState.leadCapture.data.contactInfo,
                     userMessage: sessionState.leadCapture.data.userMessage,
-                    sourceWidgetUrl: req.headers.referer || 'No especificado', // URL de la página del widget
+                    sourceWidgetUrl: req.headers.referer || 'No especificado',
                 };
 
                 try {
-                    await saveLeadToFirestore(requestClientId, leadDataToSave, requestData.conversationHistory); // conversationHistory viene de requestData
+                    // Asegurarse que conversationHistory aquí sea el historial COMPLETO hasta este punto.
+                    // El que viene en requestData.conversationHistory es el ideal.
+                    await saveLeadToFirestore(requestClientId, leadDataToSave, conversationHistory); 
                     const clinicNameForEmail = effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la Clínica";
                     const notificationEmail = effectiveConfig.leadNotificationEmail || effectiveConfig.email;
                     if (notificationEmail) {
-                        await sendLeadNotificationEmail(notificationEmail, leadDataToSave, requestData.conversationHistory, clinicNameForEmail, clientConfigData.name);
+                        await sendLeadNotificationEmail(notificationEmail, leadDataToSave, conversationHistory, clinicNameForEmail, clientConfigData.name);
                     }
                 } catch (leadSaveError) {
                     console.error(`ERROR (chat.js): Fallo al guardar/notificar lead para ${requestClientId}`, leadSaveError);
-                    // No fallar la respuesta al usuario, pero loguear el error.
                 }
                 
                 botResponseText = effectiveConfig.leadCaptureConfirmationPromptTemplate
@@ -94,37 +120,31 @@ export default async function handler(req, res) {
                     .replace("{clinicName}", effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "La clínica") 
                     || `¡Listo, ${sessionState.leadCapture.data.name}! Tus datos fueron guardados. Te contactaremos pronto. ¿En qué más te puedo ayudar?`;
                 
-                // Resetear el estado de captura de leads
-                sessionState.leadCapture.step = 'completed_this_session'; // Marcar como completado para no volver a ofrecer en esta sesión
+                sessionState.leadCapture.step = 'completed_this_session'; 
                 sessionState.leadCapture.data = { name: "", contactInfo: "", userMessage: "" };
                 break;
         }
-    }
-    // 2. Procesar si ACABAMOS de ofrecer la captura de leads
-    else if (sessionState.leadCapture.step === 'offered') {
-        leadCaptureFlowHandled = true; // Asumimos que manejaremos la respuesta aquí
+    } else if (sessionState.leadCapture.step === 'offered') {
+        console.log("DEBUG_CHAT_HANDLER: Handling response to lead capture offer.");
+        leadCaptureFlowHandled = true; 
         const affirmativeMatch = AFFIRMATIVE_LEAD_KEYWORDS.some(k => lowerMessage.includes(k));
         const negativeMatch = NEGATIVE_LEAD_KEYWORDS.some(k => lowerMessage.includes(k));
 
-        if (affirmativeMatch && !negativeMatch) { // "sí", "dale", "ya", etc. y no contiene "no"
+        if (affirmativeMatch && !negativeMatch) { 
             botResponseText = effectiveConfig.leadCaptureNamePrompt || "¿Cuál es tu nombre?";
             sessionState.leadCapture.step = 'awaiting_name';
-        } else if (negativeMatch) { // "no", "no gracias"
+        } else if (negativeMatch) { 
             botResponseText = effectiveConfig.leadCaptureDeclinedMessage || "Entendido. Si cambias de opinión, solo avísame. ¿Cómo puedo ayudarte hoy con tus consultas o horarios?";
-            sessionState.leadCapture.step = 'declined_this_session'; // Para no volver a ofrecer
-        } else { // El usuario hizo otra pregunta, ignorando la oferta de leads
-            const fallbackDecline = effectiveConfig.leadCaptureDeclinedMessage || "Entendido. Si cambias de opinión, solo avísame. ";
+            sessionState.leadCapture.step = 'declined_this_session'; 
+        } else { 
             console.log("DEBUG (chat.js): Usuario ignoró oferta de lead, procede con su consulta.");
-            sessionState.leadCapture.step = 'postponed_in_session'; // Lo pospuso, no ofrecer inmediatamente
-            leadCaptureFlowHandled = false; // Dejar que el flujo normal procese la pregunta
-            // Podríamos añadir el fallbackDecline a la respuesta normal si queremos ser explícitos.
-            // Por ahora, simplemente responderemos la pregunta (Opción B1 de Roberto).
+            sessionState.leadCapture.step = 'postponed_in_session'; 
+            leadCaptureFlowHandled = false; 
         }
     }
+    // --- FIN LÓGICA DE CAPTURA DE LEADS (PARTE 1) ---
 
-    // --- FIN LÓGICA DE CAPTURA DE LEADS (PARTE 1: PROCESAR ESTADO ACTUAL) ---
-
-    if (!leadCaptureFlowHandled) { // Si no estábamos en medio de una captura o respondiendo a la oferta
+    if (!leadCaptureFlowHandled) { 
         if (isCalendarQuery(lowerMessage)) {
             const serverNowUtc = new Date();
             const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
@@ -137,7 +157,6 @@ export default async function handler(req, res) {
 
             if (queryDetails.earlyResponse) { 
                 botResponseText = queryDetails.earlyResponse.response;
-                // No añadir oferta de lead si la respuesta ya es un "corte" (ej. fecha lejana)
             } else {
                 const calendar = await getCalendarInstance(requestClientId, clientConfigData); 
                 if (!calendar) {
@@ -168,10 +187,9 @@ export default async function handler(req, res) {
                     } catch (googleError) {
                         console.error(`❌ ERROR en fetchBusySlots (orquestador) para ${requestClientId}:`, googleError.message);
                         botResponseText = 'Error al consultar el calendario de Google.';
-                        // Aquí no hacemos return, para que pueda ofrecer captura de lead si aplica
                     }
                     
-                    if (busySlots) { // Solo si fetchBusySlots fue exitoso
+                    if (busySlots) { 
                         const availableSlotsOutput = getAvailableSlots(
                             busySlots, queryDetails, effectiveConfig, 
                             serverNowUtc, refDateForTargetCalc, 
@@ -182,28 +200,30 @@ export default async function handler(req, res) {
                             serverNowUtc, refDateForTargetCalc, busySlots, 
                             currentYearChile, requestClientId
                         );
-                    } else if (!botResponseText) { // Si busySlots es undefined y no hay otro error seteado
+                    } else if (!botResponseText) { 
                         botResponseText = "Hubo un problema obteniendo la disponibilidad del calendario.";
                     }
                 }
             }
-        } else { // No es consulta de calendario
+        } else { 
           botResponseText = await getOpenAIReply(message, effectiveConfig, requestClientId);
         }
 
         // --- INICIO LÓGICA DE CAPTURA DE LEADS (PARTE 2: OFRECER SI APLICA) ---
+        console.log("DEBUG_CHAT_HANDLER: Verificando si ofrecer lead capture. Current sessionState.leadCapture:", JSON.stringify(sessionState.leadCapture, null, 2), "Turn:", sessionState.turnCount); // LOG NUEVO
+        
         if (effectiveConfig.leadCaptureEnabled && 
-            sessionState.leadCapture.step === null && // No estamos ya en un flujo de captura
-            !sessionState.leadCapture.declinedInSession && // No ha declinado explícitamente en esta sesión
-            sessionState.turnCount <= 2 // Ofrecer solo en los primeros 2 turnos, por ejemplo
+            (sessionState.leadCapture.step === null || sessionState.leadCapture.step === 'postponed_in_session') && // Ofrecer si no hay un flujo activo o si se pospuso
+            !sessionState.leadCapture.declinedInSession && 
+            sessionState.turnCount <= 2 // Condición de ejemplo: ofrecer solo en los primeros 2 turnos si no se ha declinado antes
         ) {
             const offerPrompt = effectiveConfig.leadCaptureOfferPromptTemplate?.replace("{clinicName}", effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica") 
                                 || `Si lo deseas, puedo tomar tus datos de contacto (nombre y email/teléfono) para que ${effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica"} se comunique contigo. ¿Te gustaría?`;
             
-            botResponseText += `\n\n${offerPrompt}`; // Añadir al final de la respuesta normal
+            botResponseText += `\n\n${offerPrompt}`; 
             sessionState.leadCapture.step = 'offered';
             sessionState.leadCapture.offeredInTurn = sessionState.turnCount;
-            console.log(`DEBUG (chat.js): Ofreciendo captura de lead en turno ${sessionState.turnCount}`);
+            console.log(`DEBUG_CHAT_HANDLER: Ofreciendo captura de lead en turno ${sessionState.turnCount}`); // LOG NUEVO
         }
         // --- FIN LÓGICA DE CAPTURA DE LEADS (PARTE 2) ---
     }
@@ -212,7 +232,8 @@ export default async function handler(req, res) {
         try { await logRigbotMessage({ role: "assistant", content: botResponseText, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); } 
         catch (e) { console.error("Log Error (respuesta final):", e) } 
     }
-    // Devolver siempre el sessionState actualizado al frontend
+    
+    console.log("DEBUG_CHAT_HANDLER: Outgoing sessionState:", JSON.stringify(sessionState, null, 2)); // LOG NUEVO
     return res.status(200).json({ response: botResponseText, sessionState });
 
   } catch (error) {
@@ -231,7 +252,7 @@ export default async function handler(req, res) {
         console.error("Error al loguear el error final en handler principal:", eLogging);
       }
     }
-    // Devolver sessionState incluso en error, para que el frontend pueda mantener la cuenta de turnos, etc.
+    console.log("DEBUG_CHAT_HANDLER: Outgoing sessionState (on error):", JSON.stringify(sessionState, null, 2)); // LOG NUEVO
     return res.status(500).json({
       error: errorForUser,
       details: process.env.NODE_ENV === 'development' ? error.message + (error.stack ? `\nStack: ${error.stack.substring(0, 500)}...` : '') : undefined,

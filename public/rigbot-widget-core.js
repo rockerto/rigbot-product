@@ -108,16 +108,18 @@
     if (document.getElementById('rigbot-window-custom')) {
       console.log("--- Rigbot Widget DEBUG --- openChatWindow(): Ventana 'rigbot-window-custom' ya existe en DOM. Saliendo.");
       if (!chatWindowElement) chatWindowElement = document.getElementById('rigbot-window-custom');
+      // No resetear si la ventana ya existe y solo se está mostrando de nuevo
       return;
     }
     console.log("--- Rigbot Widget DEBUG --- openChatWindow(): 'rigbot-window-custom' no existe, procediendo a crearla.");
 
     currentSessionStateForLeadCapture = null; 
     window.rigbotConversationHistory = []; 
-    console.log("--- Rigbot Widget DEBUG --- openChatWindow(): sessionState y conversationHistory reseteados.");
+    console.log("--- Rigbot Widget DEBUG --- openChatWindow(): sessionState y conversationHistory reseteados para nueva ventana.");
 
     chatWindowElement = document.createElement('div');
     chatWindowElement.id = 'rigbot-window-custom';
+    // ... (código de estilos y innerHTML de chatWindowElement SIN CAMBIOS)
     chatWindowElement.style.cssText = `
       position: fixed; bottom: 90px; right: 20px; width: 350px; max-width: 90vw;
       height: 500px; max-height: 70vh; background-color: #ffffff; border-radius: 12px;
@@ -170,7 +172,7 @@
 
     const inputField = document.getElementById('rigbot-input-custom');
     if (inputField) {
-        inputField.focus(); // CORREGIDO: No 'as HTMLInputElement'
+        inputField.focus(); 
     } else {
         console.error("--- Rigbot Widget ERROR --- openChatWindow(): No se encontró 'rigbot-input-custom' para hacer focus.");
     }
@@ -185,7 +187,7 @@
         if (chatWindowElement && document.body.contains(chatWindowElement)) {
           chatWindowElement.remove();
         }
-        chatWindowElement = null;
+        chatWindowElement = null; // Es importante setearlo a null para que openChatWindow() sepa que debe crearla de nuevo
         console.log("--- Rigbot Widget DEBUG --- closeChatWindow(): Ventana eliminada, chatWindowElement es NULL.");
       }, 300);
     } else {
@@ -194,6 +196,7 @@
   };
 
   const addMessageToChat = (text, sender = 'bot', isLoading = false) => {
+    // ... (código de addMessageToChat SIN CAMBIOS) ...
     const chatMessagesContainer = document.getElementById('rigbot-chat-messages-custom');
     if (!chatMessagesContainer && chatWindowElement) {
       console.error("--- Rigbot Widget ERROR --- addMessageToChat: Contenedor 'rigbot-chat-messages-custom' NO ENCONTRADO dentro de chatWindowElement.");
@@ -238,7 +241,7 @@
     console.log("--- Rigbot Widget DEBUG --- sendMessage(): ¡FUNCIÓN INICIADA! ---");
     const currentClientId = window.RIGBOT_CLIENT_ID || 'demo-client'; 
     const claveFromWindow = window.RIGBOT_CLAVE || null; 
-    console.log("--- Rigbot Widget DEBUG --- sendMessage(): ClientID:", currentClientId, "Clave:", claveFromWindow ? "Presente" : "Ausente");
+    // console.log("--- Rigbot Widget DEBUG --- sendMessage(): ClientID:", currentClientId, "Clave:", claveFromWindow ? "Presente" : "Ausente"); // Log más conciso abajo
 
     const inputElement = document.getElementById('rigbot-input-custom'); 
     
@@ -249,9 +252,6 @@
       return;
     }
 
-    // CORREGIDO: Acceder a .value y .focus() asumiendo que es un input, o hacer un type check si es necesario
-    // Dado que este es un script .js para el navegador, no podemos usar aserciones de tipo TS.
-    // Se asume que getElementById devuelve un elemento que tiene .value y .focus si no es null.
     const text = inputElement.value.trim(); 
     
     if (!text) {
@@ -266,18 +266,21 @@
     inputElement.focus();   
     addMessageToChat('', 'bot', true);
 
-    window.rigbotConversationHistory.push({ role: "user", content: text });
-
-    console.log("📦 Enviando a API con clientId:", currentClientId, "y clave", (claveFromWindow ? "presente" : "ausente") ,"a URL:", backendUrl);
+    // Asegurar que el mensaje actual del usuario esté en el historial ANTES de enviarlo
+    if (window.rigbotConversationHistory[window.rigbotConversationHistory.length -1]?.role !== 'user' || 
+        window.rigbotConversationHistory[window.rigbotConversationHistory.length -1]?.content !== text) {
+        window.rigbotConversationHistory.push({ role: "user", content: text });
+    }
     
     const payload = {
         message: text,
         clientId: currentClientId,
         clave: claveFromWindow,
-        sessionId: window.RIGBOT_SESSION_ID || `widget_session_${Date.now()}`, 
+        sessionId: window.RIGBOT_SESSION_ID || `widget_session_${Date.now()}`, // Puedes generar/mantener un sessionId más persistente si quieres
         conversationHistory: window.rigbotConversationHistory,
         sessionState: currentSessionStateForLeadCapture 
     };
+    console.log("📦 Payload enviado a API:", JSON.stringify(payload, null, 2)); // LOG NUEVO: Para ver el payload completo
     
     try {
       const response = await fetch(backendUrl, {
@@ -298,11 +301,13 @@
         return;
       }
       const data = await response.json();
-      const botResponseText = data.response || 'Lo siento, no he podido procesar eso en este momento.';
+      console.log("--- Rigbot Widget DEBUG --- sendMessage(): Datos recibidos del backend:", JSON.stringify(data, null, 2)); // LOG NUEVO
       
-      currentSessionStateForLeadCapture = data.sessionState;
+      const botResponseText = data.response || 'Lo siento, no he podido procesar eso en este momento.';
+      currentSessionStateForLeadCapture = data.sessionState; // Guardar el estado actualizado
+
       if (currentSessionStateForLeadCapture) {
-        console.log("--- Rigbot Widget DEBUG --- sendMessage(): Nuevo sessionState recibido y guardado:", currentSessionStateForLeadCapture);
+        console.log("--- Rigbot Widget DEBUG --- sendMessage(): Nuevo sessionState guardado:", JSON.stringify(currentSessionStateForLeadCapture, null, 2)); // LOG NUEVO
       }
       
       addMessageToChat(botResponseText, 'bot');
