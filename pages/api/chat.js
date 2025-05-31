@@ -1,12 +1,12 @@
-// /pages/api/chat.js
+// /pages/api/chat.js (Orquestador con nuevo método de import para validateRequest)
 import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager';
-import { validateRequest } from '@/lib/chat_modules/request_validator'; // <--- CAMBIO AQUÍ (import nombrado)
+// import { validateRequest } from '@/lib/chat_modules/request_validator'; // <--- LÍNEA ANTIGUA COMENTADA
+import * as RequestValidatorModule from '@/lib/chat_modules/request_validator'; // <--- NUEVO IMPORT
 import { getCalendarInstance } from '@/lib/chat_modules/calendar_client_provider';
 import { CHILE_UTC_OFFSET_HOURS, getDayIdentifier } from '@/lib/chat_modules/dateTimeUtils';
 import { 
     isCalendarQuery, 
     parseDateTimeQuery
-    // testFunctionDTP ya no la necesitamos, la quito del import
 } from '@/lib/chat_modules/date_time_parser'; 
 import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator';
 import { buildCalendarResponse } from '@/lib/chat_modules/response_builder';
@@ -20,7 +20,9 @@ const NEGATIVE_LEAD_KEYWORDS = ["no", "no gracias", "ahora no"];
 
 
 export default async function handler(req, res) {
-  const validationResult = await validateRequest(req, res); 
+  // Llamar a validateRequest usando el módulo importado
+  const validationResult = await RequestValidatorModule.validateRequest(req, res); // <--- NUEVA FORMA DE LLAMAR
+  
   if (validationResult.handled) {
     return; 
   }
@@ -77,7 +79,6 @@ export default async function handler(req, res) {
   const effectiveConfig = getEffectiveConfig(clientConfigData); 
   console.log("🧠 Configuración efectiva usada (orquestador) para clientId", requestClientId, ":");
   console.log("   leadCaptureEnabled:", effectiveConfig.leadCaptureEnabled);
-  // console.log("   leadCaptureOfferPromptTemplate:", effectiveConfig.leadCaptureOfferPromptTemplate);
   console.log("   clinicNameForLeadPrompt:", effectiveConfig.clinicNameForLeadPrompt);
   
   try {
@@ -156,7 +157,7 @@ export default async function handler(req, res) {
 
     if (!leadCaptureFlowHandled) { 
         let primaryResponse = ""; 
-        if (isCalendarQuery(lowerMessage)) {
+        if (isCalendarQuery(lowerMessage)) { // Asegúrate que isCalendarQuery está bien importado y es una función
             const serverNowUtc = new Date();
             const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
             const currentMonthForRef = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1;
