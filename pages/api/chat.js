@@ -1,20 +1,5 @@
-// /pages/api/chat.js (Orquestador con Lógica de Captura de Leads y Nuevos Logs)
-
-import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager.js';
-import { validateRequest } from '@/lib/chat_modules/request_validator.js';
-import { getCalendarInstance } from '@/lib/chat_modules/calendar_client_provider.js';
-import { CHILE_UTC_OFFSET_HOURS, getDayIdentifier } from '@/lib/chat_modules/dateTimeUtils.js';
-import { isCalendarQuery, parseDateTimeQuery, testFunctionDTP } from '@/lib/chat_modules/date_time_parser.js';
-import { fetchBusySlots, getAvailableSlots } from '@/lib/chat_modules/slot_availability_calculator.js';
-import { buildCalendarResponse } from '@/lib/chat_modules/response_builder.js';
-import { getOpenAIReply } from '@/lib/chat_modules/openai_handler.js';
-import { saveLeadToFirestore, sendLeadNotificationEmail } from '@/lib/chat_modules/lead_manager.js'; 
-import { logRigbotMessage } from "@/lib/rigbotLog"; 
-import { db } from '@/lib/firebase-admin'; 
-
-const AFFIRMATIVE_LEAD_KEYWORDS = ["sí", "si", "ok", "dale", "bueno", "ya", "porfa", "acepto", "claro"];
-const NEGATIVE_LEAD_KEYWORDS = ["no", "no gracias", "ahora no"];
-
+// /pages/api/chat.js (Solo la sección relevante con el nuevo log)
+// ... (imports sin cambios) ...
 
 export default async function handler(req, res) {
   const validationResult = await validateRequest(req, res); 
@@ -23,23 +8,24 @@ export default async function handler(req, res) {
   }
 
   const clientConfigData = validationResult.clientConfigData || {}; 
-  const requestData = validationResult.requestData || {};
+  const requestDataFromValidator = validationResult.requestData || {}; // Renombrar para claridad
+
+  // =========== NUEVO LOG AQUÍ ===========
+  console.log("DEBUG_CHAT_ORCHESTRATOR: requestData recibido de validator:", JSON.stringify(requestDataFromValidator, null, 2));
+  // =====================================
   
-  // === INICIO DE CAMBIO EN EXTRACCIÓN Y LOGS ===
   const { 
     message, 
     sessionId: currentSessionId, 
     clientId: requestClientId, 
     ipAddress, 
-    // sessionState y conversationHistory ahora vienen de requestData gracias a request_validator.js
-    sessionState: incomingSessionStateFromValidator, 
-    conversationHistory: incomingConversationHistoryFromValidator 
-  } = requestData;
+    sessionState: incomingSessionState, // Usar el nombre que se desestructura
+    conversationHistory: incomingConversationHistory 
+  } = requestDataFromValidator; // Usar la variable renombrada
 
-  console.log("DEBUG_CHAT_HANDLER: Full requestData from validator:", JSON.stringify(requestData, null, 2));
-  // === FIN DE CAMBIO EN EXTRACCIÓN ===
+  console.log("DEBUG_CHAT_HANDLER: Full req.body (original):", JSON.stringify(req.body, null, 2)); // Este ya lo tenías, es bueno para comparar
 
-  let sessionState = incomingSessionStateFromValidator || { 
+  let sessionState = incomingSessionState || { 
     leadCapture: { 
         step: null, 
         data: { name: "", contactInfo: "", userMessage: "" }, 
@@ -48,51 +34,48 @@ export default async function handler(req, res) {
     },
     turnCount: 0 
   };
-  // Incrementar turnCount basado en el estado actual o inicializarlo
-  sessionState.turnCount = sessionState.turnCount + 1; // Ya no necesita el ( ... || 0) porque siempre estará inicializado
-
+  sessionState.turnCount = sessionState.turnCount + 1; 
   console.log("DEBUG_CHAT_HANDLER: Current sessionState (after potential init/increment):", JSON.stringify(sessionState, null, 2));
 
-  // === INICIO DE CAMBIO EN MANEJO DE CONVERSATION HISTORY ===
-  // Usar el historial de conversación que viene del requestData (ya parseado por request_validator)
-  // o inicializarlo si no viene (aunque request_validator debería manejarlo).
-  const conversationHistory = Array.isArray(incomingConversationHistoryFromValidator) ? incomingConversationHistoryFromValidator : [];
+  // ... (resto del archivo chat.js como lo tenías en la última versión que te pasé completa) ...
+  // ... (asegúrate que la lógica de conversationHistory y el logging del mensaje del usuario estén después de esto)
   
-  // El logRigbotMessage del mensaje del USUARIO ahora se hace aquí, después de toda validación inicial
-  // y antes de cualquier procesamiento de lógica de chat.
-  if (typeof logRigbotMessage === "function") { 
+  const conversationHistory = Array.isArray(incomingConversationHistory) ? incomingConversationHistory : [];
+  
+  if (typeof logRigbotMessage === "function" && message) { // Solo loguear si hay mensaje
     try { 
         console.log(`DEBUG_CHAT_HANDLER: Logging user message to Firestore: "${message}"`);
         await logRigbotMessage({ role: "user", content: message, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); 
     } 
     catch (logErr) { console.error("Error al loguear mensaje de usuario en Firestore (chat.js):", logErr); }
   }
-  // Y el historial que se usa para lógica interna y se pasa a otros módulos
-  // ya debería tener el mensaje del usuario actual si el widget lo añadió correctamente.
-  // Si no, lo añadimos aquí para consistencia interna.
-  if (conversationHistory.length === 0 || conversationHistory[conversationHistory.length -1].role !== 'user' || conversationHistory[conversationHistory.length -1].content !== message) {
-      if(conversationHistory.length > 0 && conversationHistory[conversationHistory.length -1].role === 'user' && conversationHistory[conversationHistory.length -1].content === message){
-          // Ya está, no hacer nada.
-      } else {
-          console.log("DEBUG_CHAT_HANDLER: User message not found or last in history, adding to internal conversationHistory.");
+  
+  if (conversationHistory.length === 0 || 
+      (conversationHistory.length > 0 && conversationHistory[conversationHistory.length -1].role !== 'user') ||
+      (conversationHistory.length > 0 && conversationHistory[conversationHistory.length -1].content !== message)
+     ) {
+      if(message){ // Solo añadir si hay mensaje del usuario
+          console.log("DEBUG_CHAT_HANDLER: User message added/updated in internal conversationHistory.");
           conversationHistory.push({role: "user", content: message});
       }
   }
   console.log("DEBUG_CHAT_HANDLER: Current full conversationHistory for processing:", JSON.stringify(conversationHistory, null, 2));
-  // === FIN DE CAMBIO EN MANEJO DE CONVERSATION HISTORY ===
-
-
+  
   const effectiveConfig = getEffectiveConfig(clientConfigData); 
   console.log("🧠 Configuración efectiva usada (orquestador) para clientId", requestClientId, ":");
   console.log("   leadCaptureEnabled:", effectiveConfig.leadCaptureEnabled);
-  console.log("   leadCaptureOfferPromptTemplate:", effectiveConfig.leadCaptureOfferPromptTemplate); // Puede ser largo
+  // console.log("   leadCaptureOfferPromptTemplate:", effectiveConfig.leadCaptureOfferPromptTemplate); // Puede ser muy largo, comentar si no se necesita
   console.log("   clinicNameForLeadPrompt:", effectiveConfig.clinicNameForLeadPrompt);
   
   try {
-    const lowerMessage = message.toLowerCase();
+    const lowerMessage = message.toLowerCase(); // message ya está definido
     let botResponseText = "";
     let leadCaptureFlowHandled = false; 
 
+    // ... (el resto del gran bloque try/catch que maneja la lógica de lead capture y calendario/OpenAI) ...
+    // ... (SIN CAMBIOS DESDE AQUÍ HASTA EL FINAL DEL ARCHIVO, respecto a la última versión completa que te di)
+
+    // --- INICIO LÓGICA DE CAPTURA DE LEADS (PARTE 1: PROCESAR ESTADO ACTUAL) ---
     if (sessionState.leadCapture.step && 
         sessionState.leadCapture.step !== 'offered' && 
         sessionState.leadCapture.step !== 'completed_this_session' && 
@@ -123,7 +106,6 @@ export default async function handler(req, res) {
                 };
 
                 try {
-                    // Pasar el 'conversationHistory' actual que incluye el último mensaje del lead
                     await saveLeadToFirestore(requestClientId, leadDataToSave, conversationHistory); 
                     const clinicNameForEmail = effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la Clínica";
                     const notificationEmail = effectiveConfig.leadNotificationEmail || effectiveConfig.email;
@@ -163,8 +145,6 @@ export default async function handler(req, res) {
     }
 
     if (!leadCaptureFlowHandled) { 
-        // ... (resto de la lógica de isCalendarQuery, parseDateTimeQuery, etc. SIN CAMBIOS) ...
-        // ... (hasta el final del bloque if/else de OpenAI) ...
         if (isCalendarQuery(lowerMessage)) {
             const serverNowUtc = new Date();
             const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
@@ -229,7 +209,6 @@ export default async function handler(req, res) {
           botResponseText = await getOpenAIReply(message, effectiveConfig, requestClientId);
         }
 
-        // --- LÓGICA DE OFERTA DE LEAD CAPTURE ---
         console.log("DEBUG_CHAT_HANDLER: Verificando si ofrecer lead capture. Current sessionState.leadCapture:", JSON.stringify(sessionState.leadCapture, null, 2), "Turn:", sessionState.turnCount);
         
         if (effectiveConfig.leadCaptureEnabled && 
@@ -249,20 +228,16 @@ export default async function handler(req, res) {
 
     if (typeof logRigbotMessage === "function") { 
         try { 
-            // Loguear la respuesta final del bot ANTES de añadirla al historial que se devuelve al widget
             await logRigbotMessage({ role: "assistant", content: botResponseText, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); 
-            // Añadir la respuesta del bot al historial que se devuelve para el siguiente turno
             conversationHistory.push({ role: "assistant", content: botResponseText });
         } 
         catch (e) { console.error("Log Error (respuesta final):", e) } 
     } else {
-        // Si no hay logRigbotMessage, igual añadir al historial para el widget
         conversationHistory.push({ role: "assistant", content: botResponseText });
     }
     
     console.log("DEBUG_CHAT_HANDLER: Outgoing sessionState:", JSON.stringify(sessionState, null, 2)); 
-    // Devolver el historial de conversación actualizado y el estado de sesión
-    return res.status(200).json({ response: botResponseText, sessionState, conversationHistory });
+    return res.status(200).json({ response: botResponseText, sessionState, conversationHistory }); // Devolver también el historial actualizado
 
   } catch (error) {
     console.error(`❌ Error en Rigbot Handler Principal para clientId ${requestClientId}:`, error.message, error.stack);
