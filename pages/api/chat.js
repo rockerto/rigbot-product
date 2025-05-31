@@ -1,4 +1,4 @@
-// /pages/api/chat.js (Orquestador con Opción 3 Híbrida para Lead Capture)
+// /pages/api/chat.js (Orquestador SIMPLIFICADO para nueva lógica de widget)
 
 import { getEffectiveConfig, WHATSAPP_FALLBACK_PLACEHOLDER } from '@/lib/chat_modules/config_manager.js';
 import { validateRequest } from '@/lib/chat_modules/request_validator.js';
@@ -38,16 +38,33 @@ export default async function handler(req, res) {
 
   console.log("DEBUG_CHAT_HANDLER: Full req.body (original):", JSON.stringify(req.body, null, 2)); 
 
+  // Si incomingSessionState es null (primera petición DESPUÉS del saludo del widget), 
+  // y lead capture está activado, el widget DEBERÍA haber seteado step a 'offered'.
+  // Si no, lo inicializamos de forma segura.
   let sessionState = incomingSessionState || { 
     leadCapture: { 
         step: null, 
         data: { name: "", contactInfo: "", userMessage: "" }, 
-        offeredInTurn: null,
+        offeredInTurn: null, // Podría ser 0 o 1 si el widget lo seteó
         declinedInSession: false 
     },
     turnCount: 0 
   };
-  sessionState.turnCount = sessionState.turnCount + 1; 
+  sessionState.turnCount = (incomingSessionState?.turnCount || 0) + 1; 
+  
+  // Si el widget indicó que la oferta ya se hizo, y este es el primer mensaje del usuario (turnCount = 1),
+  // y el estado de leadCapture aún es null en el backend (no debería pasar si el widget envía 'offered'),
+  // forzamos el estado a 'offered'.
+  if (sessionState.turnCount === 1 && 
+      effectiveConfig.leadCaptureEnabled && // Necesitamos effectiveConfig aquí
+      sessionState.leadCapture.step === null &&
+      req.body?.initialOfferMadeByWidget === true // Suponiendo que el widget ahora envía esta bandera si él hizo la oferta
+      ) {
+     // Esto es un fallback, idealmente el widget envía el sessionState con step: 'offered'
+     console.warn("DEBUG_CHAT_HANDLER: Widget indicó oferta inicial, pero sessionState.leadCapture.step era null. Forzando a 'offered'.");
+     sessionState.leadCapture.step = 'offered';
+     sessionState.leadCapture.offeredInTurn = 0; // Turno 0 fue el saludo del widget
+  }
   console.log("DEBUG_CHAT_HANDLER: Current sessionState (after potential init/increment):", JSON.stringify(sessionState, null, 2));
   
   let conversationHistory = Array.isArray(incomingConversationHistory) ? incomingConversationHistory : [];
@@ -60,15 +77,9 @@ export default async function handler(req, res) {
     catch (logErr) { console.error("Error al loguear mensaje de usuario en Firestore (chat.js):", logErr); }
   }
   
-  if (conversationHistory.length === 0 || 
-      (conversationHistory.length > 0 && conversationHistory[conversationHistory.length -1].role !== 'user') ||
-      (conversationHistory.length > 0 && conversationHistory[conversationHistory.length -1].content !== message)
-     ) {
-      if(message){ 
-          console.log("DEBUG_CHAT_HANDLER: User message added/updated in internal conversationHistory.");
-          conversationHistory.push({role: "user", content: message});
-      }
-  }
+  // El widget ya debería estar añadiendo el user message al historial que envía.
+  // No necesitamos añadirlo aquí de nuevo si ya está.
+  // if (conversationHistory.length === 0 || ...) { ... } -> Eliminado para simplificar
   console.log("DEBUG_CHAT_HANDLER: Current full conversationHistory for processing:", JSON.stringify(conversationHistory, null, 2));
   
   const effectiveConfig = getEffectiveConfig(clientConfigData); 
@@ -81,66 +92,17 @@ export default async function handler(req, res) {
     let botResponseText = ""; 
     let leadCaptureFlowHandled = false; 
 
-    // --- INICIO LÓGICA DE CAPTURA DE LEADS (PARTE 1: PROCESAR ESTADO ACTUAL) ---
-    if (sessionState.leadCapture.step && 
-        sessionState.leadCapture.step !== 'offered' && 
-        sessionState.leadCapture.step !== 'completed_this_session' && 
-        sessionState.leadCapture.step !== 'declined_this_session' &&
-        sessionState.leadCapture.step !== 'postponed_in_session' 
-    ) {
-        console.log(`DEBUG_CHAT_HANDLER: Active lead capture step: ${sessionState.leadCapture.step}`);
-        leadCaptureFlowHandled = true;
-        switch (sessionState.leadCapture.step) {
-            case 'awaiting_name':
-                sessionState.leadCapture.data.name = message; 
-                botResponseText = effectiveConfig.leadCaptureContactPromptTemplate?.replace("{userName}", message || "tú") || `Gracias, ${message || "tú"}. ¿Cuál es tu email o teléfono?`;
-                sessionState.leadCapture.step = 'awaiting_contact';
-                break;
-            case 'awaiting_contact':
-                sessionState.leadCapture.data.contactInfo = message; 
-                botResponseText = effectiveConfig.leadCaptureMessagePrompt || "¿Algo más que quieras añadir (opcional)?";
-                sessionState.leadCapture.step = 'awaiting_message';
-                break;
-            case 'awaiting_message':
-                sessionState.leadCapture.data.userMessage = message; 
-                
-                const leadDataToSave = {
-                    name: sessionState.leadCapture.data.name,
-                    contactInfo: sessionState.leadCapture.data.contactInfo,
-                    userMessage: sessionState.leadCapture.data.userMessage,
-                    sourceWidgetUrl: req.headers.referer || 'No especificado',
-                };
-
-                try {
-                    await saveLeadToFirestore(requestClientId, leadDataToSave, conversationHistory); 
-                    const clinicNameForEmail = effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la Clínica";
-                    const notificationEmail = effectiveConfig.leadNotificationEmail || effectiveConfig.email;
-                    if (notificationEmail) {
-                        await sendLeadNotificationEmail(notificationEmail, leadDataToSave, conversationHistory, clinicNameForEmail, clientConfigData.name);
-                    }
-                } catch (leadSaveError) {
-                    console.error(`ERROR (chat.js): Fallo al guardar/notificar lead para ${requestClientId}`, leadSaveError);
-                }
-                
-                botResponseText = effectiveConfig.leadCaptureConfirmationPromptTemplate
-                    ?.replace("{userName}", sessionState.leadCapture.data.name || "tú")
-                    .replace("{clinicName}", effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "La clínica") 
-                    || `¡Listo, ${sessionState.leadCapture.data.name}! Tus datos fueron guardados. Te contactaremos pronto. ¿En qué más te puedo ayudar?`;
-                
-                sessionState.leadCapture.step = 'completed_this_session'; 
-                sessionState.leadCapture.data = { name: "", contactInfo: "", userMessage: "" };
-                break;
-        }
-    } else if (sessionState.leadCapture.step === 'offered') {
-        console.log("DEBUG_CHAT_HANDLER: Handling response to lead capture offer.");
+    // --- LÓGICA DE CAPTURA DE LEADS (PARTE 1: PROCESAR ESTADO ACTIVO O RESPUESTA A OFERTA) ---
+    // Esta lógica ahora es la PRIMERA que se evalúa.
+    if (sessionState.leadCapture.step === 'offered') { // Usuario está respondiendo a la oferta inicial del widget
+        console.log("DEBUG_CHAT_HANDLER: Handling response to initial lead capture offer.");
         leadCaptureFlowHandled = true; 
-        const affirmativeMatch = AFFIRMATIVE_LEAD_KEYWORDS.some(k => lowerMessage.startsWith(k + " ") || lowerMessage === k); // Más preciso
+        const affirmativeMatch = AFFIRMATIVE_LEAD_KEYWORDS.some(k => lowerMessage.startsWith(k + " ") || lowerMessage === k);
         const negativeMatch = NEGATIVE_LEAD_KEYWORDS.some(k => lowerMessage.startsWith(k + " ") || lowerMessage === k);
-
         let userNameFromMessage = null;
-        // Intento de extraer un nombre si no es un "sí" o "no" claro y no es una pregunta de calendario
+
         if (!affirmativeMatch && !negativeMatch && !isCalendarQuery(lowerMessage) && lowerMessage.length > 1 && lowerMessage.length < 50 && !lowerMessage.includes("?")) { 
-            let potentialName = message; // Usar mensaje original para capitalización
+            let potentialName = message; 
             const prefixes = ["soy ", "me llamo ", "mi nombre es "];
             for (const prefix of prefixes) {
                 if (lowerMessage.startsWith(prefix)) {
@@ -149,7 +111,7 @@ export default async function handler(req, res) {
                 }
             }
             userNameFromMessage = potentialName.split(' ')
-                .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()) // Mejor capitalización
+                .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
                 .join(' ');
             console.log(`DEBUG_CHAT_HANDLER: Posible nombre extraído de la respuesta a la oferta: '${userNameFromMessage}'`);
         }
@@ -163,18 +125,70 @@ export default async function handler(req, res) {
             botResponseText = effectiveConfig.leadCaptureNamePrompt || "¿Cuál es tu nombre?";
             sessionState.leadCapture.step = 'awaiting_name';
         } else if (negativeMatch) { 
-            botResponseText = effectiveConfig.leadCaptureDeclinedMessage || "Entendido. Si cambias de opinión, solo avísame. ¿Cómo puedo ayudarte hoy con tus consultas o horarios?";
+            botResponseText = (effectiveConfig.leadCaptureDeclinedMessage || "Entendido. Si cambias de opinión, solo avísame.") + "\n\n¿Cómo puedo ayudarte hoy con tus consultas o horarios?";
             sessionState.leadCapture.step = 'declined_this_session'; 
-        } else { 
-            console.log("DEBUG (chat.js): Usuario ignoró/respondió ambiguamente a oferta de lead, procede con su consulta.");
-            sessionState.leadCapture.step = 'postponed_in_session'; 
-            leadCaptureFlowHandled = false; 
+        } else { // El usuario hizo una pregunta directamente después de la oferta inicial
+            console.log("DEBUG (chat.js): Usuario ignoró oferta inicial de lead, se procesará su consulta.");
+            sessionState.leadCapture.step = 'postponed_in_session'; // O simplemente null para que no se vuelva a ofrecer inmediatamente
+            leadCaptureFlowHandled = false; // Dejar que la consulta se procese normalmente abajo
+        }
+    } else if (sessionState.leadCapture.step && // Pasos activos como awaiting_name, etc.
+        sessionState.leadCapture.step !== 'completed_this_session' && 
+        sessionState.leadCapture.step !== 'declined_this_session' &&
+        sessionState.leadCapture.step !== 'postponed_in_session' 
+    ) {
+        console.log(`DEBUG_CHAT_HANDLER: Active lead capture step: ${sessionState.leadCapture.step}`);
+        leadCaptureFlowHandled = true;
+        // ... (switch para awaiting_name, awaiting_contact, awaiting_message - SIN CAMBIOS)
+        switch (sessionState.leadCapture.step) {
+            case 'awaiting_name':
+                sessionState.leadCapture.data.name = message; 
+                botResponseText = effectiveConfig.leadCaptureContactPromptTemplate?.replace("{userName}", message || "tú") 
+                                  || `Gracias, ${message || "tú"}. ¿Cuál es tu email o teléfono?`;
+                sessionState.leadCapture.step = 'awaiting_contact';
+                break;
+            case 'awaiting_contact':
+                sessionState.leadCapture.data.contactInfo = message; 
+                botResponseText = effectiveConfig.leadCaptureMessagePrompt 
+                                  || "¿Algo más que quieras añadir (opcional)?";
+                sessionState.leadCapture.step = 'awaiting_message';
+                break;
+            case 'awaiting_message':
+                sessionState.leadCapture.data.userMessage = message; 
+                const leadDataToSave = {
+                    name: sessionState.leadCapture.data.name,
+                    contactInfo: sessionState.leadCapture.data.contactInfo,
+                    userMessage: sessionState.leadCapture.data.userMessage,
+                    sourceWidgetUrl: req.headers.referer || 'No especificado',
+                };
+                try {
+                    await saveLeadToFirestore(requestClientId, leadDataToSave, conversationHistory); 
+                    const clinicNameForEmail = effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la Clínica";
+                    const notificationEmail = effectiveConfig.leadNotificationEmail || effectiveConfig.email;
+                    if (notificationEmail) {
+                        await sendLeadNotificationEmail(notificationEmail, leadDataToSave, conversationHistory, clinicNameForEmail, clientConfigData.name);
+                    }
+                } catch (leadSaveError) { console.error(`ERROR (chat.js): Fallo al guardar/notificar lead para ${requestClientId}`, leadSaveError); }
+                botResponseText = effectiveConfig.leadCaptureConfirmationPromptTemplate
+                    ?.replace("{userName}", sessionState.leadCapture.data.name || "tú")
+                    .replace("{clinicName}", effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "La clínica") 
+                    || `¡Listo, ${sessionState.leadCapture.data.name}! Tus datos fueron guardados. Te contactaremos pronto. ¿En qué más te puedo ayudar?`;
+                sessionState.leadCapture.step = 'completed_this_session'; 
+                sessionState.leadCapture.data = { name: "", contactInfo: "", userMessage: "" };
+                break;
         }
     }
+    
 
-    if (!leadCaptureFlowHandled) { 
-        let primaryResponse = ""; 
+    // --- SI NINGÚN FLUJO DE LEAD CAPTURE ACTIVO MANEJÓ LA RESPUESTA ARRIBA ---
+    if (!leadCaptureFlowHandled) {
+        // Ya no necesitamos una lógica compleja para "ofrecer" aquí,
+        // porque la oferta se hace en el saludo inicial del widget.
+        // Si el usuario ignoró la oferta (step es 'postponed_in_session') o ya completó/declinó,
+        // simplemente procesamos su consulta actual.
+        console.log("DEBUG_CHAT_HANDLER: No hay flujo de lead activo, procesando consulta normalmente.");
         if (isCalendarQuery(lowerMessage)) {
+            // ... (lógica de calendario como estaba) ...
             const serverNowUtc = new Date();
             const currentYearChile = parseInt(new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10);
             const currentMonthForRef = parseInt(new Intl.DateTimeFormat('en-US', { month: 'numeric', timeZone: 'America/Santiago' }).format(serverNowUtc), 10) -1;
@@ -185,11 +199,11 @@ export default async function handler(req, res) {
             const queryDetails = parseDateTimeQuery(lowerMessage, effectiveConfig, serverNowUtc, refDateForTargetCalc, requestClientId);
 
             if (queryDetails.earlyResponse) { 
-                primaryResponse = queryDetails.earlyResponse.response;
+                botResponseText = queryDetails.earlyResponse.response;
             } else {
                 const calendar = await getCalendarInstance(requestClientId, clientConfigData); 
                 if (!calendar) {
-                    primaryResponse = "Lo siento, estoy teniendo problemas para conectar con el servicio de calendario en este momento.";
+                    botResponseText = "Lo siento, estoy teniendo problemas para conectar con el servicio de calendario en este momento.";
                 } else {
                     let calendarQueryStartUtc;
                     if (queryDetails.targetDateForDisplay) { calendarQueryStartUtc = new Date(queryDetails.targetDateForDisplay.getTime());} 
@@ -215,7 +229,7 @@ export default async function handler(req, res) {
                         busySlots = await fetchBusySlots(calendar, calendarQueryStartUtc.toISOString(), calendarQueryEndUtc.toISOString(), requestClientId);
                     } catch (googleError) {
                         console.error(`❌ ERROR en fetchBusySlots (orquestador) para ${requestClientId}:`, googleError.message);
-                        primaryResponse = 'Error al consultar el calendario de Google.';
+                        botResponseText = 'Error al consultar el calendario de Google.';
                     }
                     
                     if (busySlots) { 
@@ -224,46 +238,26 @@ export default async function handler(req, res) {
                             serverNowUtc, refDateForTargetCalc, 
                             calendarQueryStartUtc, requestClientId
                         );
-                        primaryResponse = buildCalendarResponse(
+                        botResponseText = buildCalendarResponse(
                             availableSlotsOutput, queryDetails, effectiveConfig, 
                             serverNowUtc, refDateForTargetCalc, busySlots, 
                             currentYearChile, requestClientId
                         );
-                    } else if (!primaryResponse) { 
-                        primaryResponse = "Hubo un problema obteniendo la disponibilidad del calendario.";
+                    } else if (!botResponseText) { 
+                        botResponseText = "Hubo un problema obteniendo la disponibilidad del calendario.";
                     }
                 }
             }
         } else { 
-          primaryResponse = await getOpenAIReply(message, effectiveConfig, requestClientId); 
-        }
-
-        botResponseText = primaryResponse; 
-
-        console.log("DEBUG_CHAT_HANDLER: Verificando si ofrecer lead capture. Current sessionState.leadCapture:", JSON.stringify(sessionState.leadCapture, null, 2), "Turn:", sessionState.turnCount);
-        
-        if (effectiveConfig.leadCaptureEnabled && 
-            (sessionState.leadCapture.step === null || sessionState.leadCapture.step === 'postponed_in_session') &&
-            !sessionState.leadCapture.declinedInSession && 
-            sessionState.turnCount <= 2 
-        ) {
-            const clinicName = effectiveConfig.clinicNameForLeadPrompt || effectiveConfig.name || "la clínica";
-            const offerPrompt = (effectiveConfig.leadCaptureOfferPromptTemplate || 
-                                `Si lo deseas, puedo tomar tus datos de contacto (nombre y email/teléfono) para que {clinicName} se comunique contigo. ¿Te gustaría?`)
-                                .replace("{clinicName}", clinicName);
-            
-            botResponseText = (botResponseText || (effectiveConfig.fallbackMessage || "No estoy seguro de cómo responder a eso.")) + `\n\n${offerPrompt}`; 
-            
-            sessionState.leadCapture.step = 'offered';
-            sessionState.leadCapture.offeredInTurn = sessionState.turnCount;
-            console.log(`DEBUG_CHAT_HANDLER: Ofreciendo captura de lead en turno ${sessionState.turnCount}`);
+          botResponseText = await getOpenAIReply(message, effectiveConfig, requestClientId); 
         }
     }
     
+    // --- LOGUEO Y RETORNO DE RESPUESTA ---
+    // (Esta sección sin cambios)
     if (typeof logRigbotMessage === "function") { 
         try { 
             await logRigbotMessage({ role: "assistant", content: botResponseText, sessionId: currentSessionId, ip: ipAddress, clientId: requestClientId }); 
-            // Solo añadir a este historial si no es el mismo que el último mensaje, para evitar duplicados si el widget ya lo hace
             if (conversationHistory.length === 0 || conversationHistory[conversationHistory.length -1]?.role !== 'assistant' || conversationHistory[conversationHistory.length -1]?.content !== botResponseText) {
                 conversationHistory.push({ role: "assistant", content: botResponseText });
             }
@@ -281,6 +275,7 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error(`❌ Error en Rigbot Handler Principal para clientId ${requestClientId}:`, error.message, error.stack);
     const errorForUser = 'Ocurrió un error inesperado en RigBot. Por favor, intenta más tarde.';
+    // ... (manejo de error y logueo sin cambios)
     if (typeof logRigbotMessage === "function") {
       try {
         await logRigbotMessage({
@@ -294,8 +289,7 @@ export default async function handler(req, res) {
         console.error("Error al loguear el error final en handler principal:", eLogging);
       }
     }
-    // Asegurarse de que sessionState siempre se devuelva, incluso en error, para que el widget pueda mantener la cuenta de turnos.
-    const safeSessionStateOnError = sessionState || { leadCapture: { step: null, data: {}, offeredInTurn: null, declinedInSession: false }, turnCount: 0 };
+    const safeSessionStateOnError = sessionState || { leadCapture: { step: null, data: {}, offeredInTurn: null, declinedInSession: false }, turnCount: (sessionState?.turnCount || 0) };
     console.log("DEBUG_CHAT_HANDLER: Outgoing sessionState (on error):", JSON.stringify(safeSessionStateOnError, null, 2)); 
     return res.status(500).json({
       error: errorForUser,

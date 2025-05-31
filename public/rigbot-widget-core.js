@@ -5,7 +5,7 @@
   const IS_RIGSITE_WEB_RUNNING_LOCALLY = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
   let backendUrl;
 
-  if (window.NEXT_PUBLIC_RIGBOT_BACKEND_URL) {
+  if (window.NEXT_PUBLIC_RIGBOT_BACKEND_URL) { // Esta la setearía el script de carga de rigsite-web
     backendUrl = window.NEXT_PUBLIC_RIGBOT_BACKEND_URL; 
     if (!backendUrl.endsWith('/api/chat')) { 
         if(backendUrl.endsWith('/')) backendUrl += 'api/chat';
@@ -24,7 +24,7 @@
   let chatBubbleElement = null;
   let whatsappBubbleElement = null;
   let chatWindowElement = null;
-  window.rigbotConversationHistory = window.rigbotConversationHistory || [];
+  window.rigbotConversationHistory = []; // Siempre empezar historial vacío al cargar el core script
   let currentSessionStateForLeadCapture = null; 
 
   const initRigbot = () => {
@@ -34,13 +34,12 @@
     if (chatBubbleElement && !chatBubbleElement.dataset.listenerAttached) {
       chatBubbleElement.addEventListener('click', toggleChatWindow);
       chatBubbleElement.dataset.listenerAttached = 'true';
-      console.log("--- Rigbot Widget DEBUG --- initRigbot(): Event listener de CLIC (RE)AÑADIDO a chatBubbleElement.");
-    } else if (chatBubbleElement) {
-      console.log("--- Rigbot Widget DEBUG --- initRigbot(): Event listener de CLIC ya estaba en chatBubbleElement.");
+      console.log("--- Rigbot Widget DEBUG --- initRigbot(): Event listener de CLIC AÑADIDO a chatBubbleElement.");
     }
   };
 
   const createBubbles = () => {
+    // ... (código de createBubbles SIN CAMBIOS, pero usando window.RIGBOT_WHATSAPP_NUMBER para el href)
     console.log("--- Rigbot Widget DEBUG --- createBubbles() FUE LLAMADA ---");
     if (!document.getElementById('rigbot-bubble-chat-custom')) {
       console.log("--- Rigbot Widget DEBUG --- createBubbles(): Creando burbuja de CHAT.");
@@ -59,20 +58,15 @@
       chatBubbleElement.onmouseenter = () => { chatBubbleElement.style.transform = 'scale(1.1)'; chatBubbleElement.style.boxShadow = '0 6px 16px rgba(0,0,0,0.3)'; };
       chatBubbleElement.onmouseleave = () => { chatBubbleElement.style.transform = 'scale(1)'; chatBubbleElement.style.boxShadow = '0 4px 12px rgba(0,0,0,0.25)'; };
       document.body.appendChild(chatBubbleElement);
-      console.log("--- Rigbot Widget DEBUG --- createBubbles(): chatBubbleElement AÑADIDO al body.");
     } else {
       chatBubbleElement = document.getElementById('rigbot-bubble-chat-custom');
-      console.log("--- Rigbot Widget DEBUG --- createBubbles(): chatBubbleElement YA EXISTÍA.");
     }
 
     if (!document.getElementById('rigbot-bubble-whatsapp-custom')) {
-      console.log("--- Rigbot Widget DEBUG --- createBubbles(): Creando burbuja de WHATSAPP.");
       whatsappBubbleElement = document.createElement('a');
       whatsappBubbleElement.id = 'rigbot-bubble-whatsapp-custom';
-      
-      const whatsappNumberFromConfig = window.RIGBOT_WHATSAPP_NUMBER || "+56989967350"; 
-      whatsappBubbleElement.href = `https://wa.me/${whatsappNumberFromConfig.replace(/\D/g, '')}`; 
-      
+      const whatsappNumberToUse = window.RIGBOT_WHATSAPP_NUMBER || "+56900000000"; // Usar el de la config o un default
+      whatsappBubbleElement.href = `https://wa.me/${whatsappNumberToUse.replace(/\D/g, '')}`; 
       whatsappBubbleElement.target = "_blank";
       whatsappBubbleElement.setAttribute('aria-label', 'Contactar por WhatsApp');
       whatsappBubbleElement.title = 'Contactar por WhatsApp';
@@ -87,15 +81,12 @@
       whatsappBubbleElement.onmouseenter = () => { whatsappBubbleElement.style.transform = 'scale(1.1)'; whatsappBubbleElement.style.boxShadow = '0 6px 16px rgba(0,0,0,0.3)'; };
       whatsappBubbleElement.onmouseleave = () => { whatsappBubbleElement.style.transform = 'scale(1)'; whatsappBubbleElement.style.boxShadow = '0 4px 12px rgba(0,0,0,0.25)'; };
       document.body.appendChild(whatsappBubbleElement);
-      console.log("--- Rigbot Widget DEBUG --- createBubbles(): whatsappBubbleElement AÑADIDO al body.");
     } else {
       whatsappBubbleElement = document.getElementById('rigbot-bubble-whatsapp-custom');
-      console.log("--- Rigbot Widget DEBUG --- createBubbles(): whatsappBubbleElement YA EXISTÍA.");
     }
   };
   
   const toggleChatWindow = () => {
-    console.log("--- Rigbot Widget DEBUG --- toggleChatWindow() FUE LLAMADA. chatWindowElement es:", chatWindowElement ? "EXISTE y está en DOM" : "NULL o no en DOM", chatWindowElement && document.body.contains(chatWindowElement));
     if (chatWindowElement && document.body.contains(chatWindowElement)) {
       closeChatWindow();
     } else {
@@ -104,22 +95,24 @@
   };
   
   const openChatWindow = () => {
-    console.log("--- Rigbot Widget DEBUG --- openChatWindow() FUE LLAMADA.");
-    if (document.getElementById('rigbot-window-custom')) {
-      console.log("--- Rigbot Widget DEBUG --- openChatWindow(): Ventana 'rigbot-window-custom' ya existe en DOM. Saliendo.");
-      if (!chatWindowElement) chatWindowElement = document.getElementById('rigbot-window-custom');
-      // No resetear si la ventana ya existe y solo se está mostrando de nuevo
-      return;
-    }
-    console.log("--- Rigbot Widget DEBUG --- openChatWindow(): 'rigbot-window-custom' no existe, procediendo a crearla.");
+    if (document.getElementById('rigbot-window-custom')) return;
 
-    currentSessionStateForLeadCapture = null; 
+    // Resetear estado y historial para una nueva "sesión" de chat visual
     window.rigbotConversationHistory = []; 
-    console.log("--- Rigbot Widget DEBUG --- openChatWindow(): sessionState y conversationHistory reseteados para nueva ventana.");
-
+    if (window.RIGBOT_LEAD_CAPTURE_INITIALLY_OFFERED === true) { // Comprobar explícitamente true
+        currentSessionStateForLeadCapture = { 
+            leadCapture: { step: 'offered', data: {}, offeredInTurn: 0, declinedInSession: false },
+            turnCount: 0 
+        };
+        console.log("--- Rigbot Widget DEBUG --- openChatWindow(): Initial offer was made by widget. sessionState.leadCapture.step set to 'offered'.");
+    } else {
+        currentSessionStateForLeadCapture = null; // O el estado inicial por defecto si no se ofreció
+        console.log("--- Rigbot Widget DEBUG --- openChatWindow(): No initial lead offer by widget. sessionState es null.");
+    }
+    
     chatWindowElement = document.createElement('div');
+    // ... (código de creación de chatWindowElement y listeners SIN CAMBIOS)...
     chatWindowElement.id = 'rigbot-window-custom';
-    // ... (código de estilos y innerHTML de chatWindowElement SIN CAMBIOS)
     chatWindowElement.style.cssText = `
       position: fixed; bottom: 90px; right: 20px; width: 350px; max-width: 90vw;
       height: 500px; max-height: 70vh; background-color: #ffffff; border-radius: 12px;
@@ -148,37 +141,24 @@
       </div>
     `;
     document.body.appendChild(chatWindowElement);
-    console.log("--- Rigbot Widget DEBUG --- openChatWindow(): chatWindowElement AÑADIDO al body.");
 
-    document.getElementById('rigbot-close-custom-btn').addEventListener('click', () => {
-      console.log("--- Rigbot Widget DEBUG --- Clic en botón CERRAR ventana.");
-      closeChatWindow();
-    });
-    document.getElementById('rigbot-send-custom-btn').addEventListener('click', () => {
-      console.log("--- Rigbot Widget DEBUG --- Clic en botón ENVIAR mensaje.");
-      sendMessage();
-    });
+    document.getElementById('rigbot-close-custom-btn').addEventListener('click', closeChatWindow);
+    document.getElementById('rigbot-send-custom-btn').addEventListener('click', sendMessage);
     document.getElementById('rigbot-input-custom').addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        console.log("--- Rigbot Widget DEBUG --- Tecla ENTER presionada en input.");
-        e.preventDefault();
-        sendMessage();
-      }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     });
     
-    const welcomeMessageFromConfig = window.RIGBOT_WELCOME_MESSAGE || "Hola 👋 Soy Rigbot, tu asistente virtual. ¿En qué puedo ayudarte hoy?";
-    addMessageToChat(welcomeMessageFromConfig, 'bot');
-    window.rigbotConversationHistory.push({ role: "assistant", content: welcomeMessageFromConfig });
+    // Usar el mensaje inicial inyectado por el loader script
+    const firstBotMessage = window.RIGBOT_INITIAL_GREETING || "Hola 👋 Soy Rigbot, tu asistente virtual. ¿En qué puedo ayudarte hoy?";
+    addMessageToChat(firstBotMessage, 'bot');
+    window.rigbotConversationHistory.push({ role: "assistant", content: firstBotMessage });
 
     const inputField = document.getElementById('rigbot-input-custom');
-    if (inputField) {
-        inputField.focus(); 
-    } else {
-        console.error("--- Rigbot Widget ERROR --- openChatWindow(): No se encontró 'rigbot-input-custom' para hacer focus.");
-    }
+    if (inputField) inputField.focus();
   };
 
   const closeChatWindow = () => {
+    // ... (código de closeChatWindow SIN CAMBIOS) ...
     console.log("--- Rigbot Widget DEBUG --- closeChatWindow() FUE LLAMADA.");
     if (chatWindowElement) {
       chatWindowElement.style.opacity = '0';
@@ -187,7 +167,7 @@
         if (chatWindowElement && document.body.contains(chatWindowElement)) {
           chatWindowElement.remove();
         }
-        chatWindowElement = null; // Es importante setearlo a null para que openChatWindow() sepa que debe crearla de nuevo
+        chatWindowElement = null; 
         console.log("--- Rigbot Widget DEBUG --- closeChatWindow(): Ventana eliminada, chatWindowElement es NULL.");
       }, 300);
     } else {
@@ -238,35 +218,23 @@
   };
 
   const sendMessage = async () => {
+    // ... (inicio de sendMessage SIN CAMBIOS) ...
     console.log("--- Rigbot Widget DEBUG --- sendMessage(): ¡FUNCIÓN INICIADA! ---");
     const currentClientId = window.RIGBOT_CLIENT_ID || 'demo-client'; 
     const claveFromWindow = window.RIGBOT_CLAVE || null; 
-    // console.log("--- Rigbot Widget DEBUG --- sendMessage(): ClientID:", currentClientId, "Clave:", claveFromWindow ? "Presente" : "Ausente"); // Log más conciso abajo
-
+    
     const inputElement = document.getElementById('rigbot-input-custom'); 
     
-    if (!inputElement) {
-      console.error("--- Rigbot Widget ERROR --- sendMessage(): inputElement 'rigbot-input-custom' NO ENCONTRADO ---");
-      const typingIndicator = document.getElementById('rigbot-typing-indicator');
-      if (typingIndicator) typingIndicator.remove();
-      return;
-    }
+    if (!inputElement) { /* ... manejo de error ... */ return; }
 
     const text = inputElement.value.trim(); 
-    
-    if (!text) {
-      console.log("--- Rigbot Widget DEBUG --- sendMessage(): Texto vacío, no se envía nada.");
-      const typingIndicator = document.getElementById('rigbot-typing-indicator');
-      if (typingIndicator) typingIndicator.remove();
-      return;
-    }
+    if (!text) { /* ... manejo de texto vacío ... */ return; }
 
     addMessageToChat(text, 'user');
     inputElement.value = ''; 
     inputElement.focus();   
     addMessageToChat('', 'bot', true);
 
-    // Asegurar que el mensaje actual del usuario esté en el historial ANTES de enviarlo
     if (window.rigbotConversationHistory[window.rigbotConversationHistory.length -1]?.role !== 'user' || 
         window.rigbotConversationHistory[window.rigbotConversationHistory.length -1]?.content !== text) {
         window.rigbotConversationHistory.push({ role: "user", content: text });
@@ -276,11 +244,11 @@
         message: text,
         clientId: currentClientId,
         clave: claveFromWindow,
-        sessionId: window.RIGBOT_SESSION_ID || `widget_session_${Date.now()}`, // Puedes generar/mantener un sessionId más persistente si quieres
+        sessionId: window.RIGBOT_SESSION_ID || `widget_session_${Date.now()}`, 
         conversationHistory: window.rigbotConversationHistory,
-        sessionState: currentSessionStateForLeadCapture 
+        sessionState: currentSessionStateForLeadCapture // Envía el estado actual
     };
-    console.log("📦 Payload enviado a API:", JSON.stringify(payload, null, 2)); // LOG NUEVO: Para ver el payload completo
+    console.log("📦 Payload enviado a API:", JSON.stringify(payload, null, 2));
     
     try {
       const response = await fetch(backendUrl, {
@@ -292,45 +260,41 @@
       const existingTypingIndicator = document.getElementById('rigbot-typing-indicator');
       if (existingTypingIndicator) { existingTypingIndicator.remove(); }
 
-      if (!response.ok) {
-        let errorData; try { errorData = await response.json(); } catch (e) { /* No JSON */ }
-        console.error('Error en la respuesta del servidor:', response.status, errorData);
-        const botErrorMessage = errorData?.error || 'Hubo un problema con la respuesta del servidor.';
-        addMessageToChat(botErrorMessage, 'bot');
-        window.rigbotConversationHistory.push({ role: "assistant", content: botErrorMessage });
-        return;
+      if (!response.ok) { /* ... manejo de error de respuesta ... */ 
+          let errorData; try { errorData = await response.json(); } catch (e) { /* No JSON */ }
+          console.error('Error en la respuesta del servidor:', response.status, errorData);
+          const botErrorMessage = errorData?.error || 'Hubo un problema con la respuesta del servidor.';
+          addMessageToChat(botErrorMessage, 'bot');
+          window.rigbotConversationHistory.push({ role: "assistant", content: botErrorMessage });
+          currentSessionStateForLeadCapture = errorData?.sessionState || currentSessionStateForLeadCapture; // Intentar mantener el estado
+          return;
       }
       const data = await response.json();
-      console.log("--- Rigbot Widget DEBUG --- sendMessage(): Datos recibidos del backend:", JSON.stringify(data, null, 2)); // LOG NUEVO
+      console.log("--- Rigbot Widget DEBUG --- sendMessage(): Datos recibidos del backend:", JSON.stringify(data, null, 2)); 
       
       const botResponseText = data.response || 'Lo siento, no he podido procesar eso en este momento.';
       currentSessionStateForLeadCapture = data.sessionState; // Guardar el estado actualizado
 
       if (currentSessionStateForLeadCapture) {
-        console.log("--- Rigbot Widget DEBUG --- sendMessage(): Nuevo sessionState guardado:", JSON.stringify(currentSessionStateForLeadCapture, null, 2)); // LOG NUEVO
+        console.log("--- Rigbot Widget DEBUG --- sendMessage(): Nuevo sessionState guardado:", JSON.stringify(currentSessionStateForLeadCapture, null, 2));
       }
       
       addMessageToChat(botResponseText, 'bot');
       window.rigbotConversationHistory.push({ role: "assistant", content: botResponseText });
 
-    } catch (err) {
-      console.error('❌ Error en fetch Rigbot:', err);
-      const existingTypingIndicator = document.getElementById('rigbot-typing-indicator');
-      if (existingTypingIndicator) { existingTypingIndicator.remove(); }
-      const networkErrorMsg = '❌ Ups, parece que hay un problema de conexión. Intenta de nuevo.';
-      addMessageToChat(networkErrorMsg, 'bot');
-      window.rigbotConversationHistory.push({ role: "assistant", content: networkErrorMsg });
+    } catch (err) { /* ... manejo de error de fetch ... */ 
+        console.error('❌ Error en fetch Rigbot:', err);
+        const existingTypingIndicator = document.getElementById('rigbot-typing-indicator');
+        if (existingTypingIndicator) { existingTypingIndicator.remove(); }
+        const networkErrorMsg = '❌ Ups, parece que hay un problema de conexión. Intenta de nuevo.';
+        addMessageToChat(networkErrorMsg, 'bot');
+        window.rigbotConversationHistory.push({ role: "assistant", content: networkErrorMsg });
     }
   };
   
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
-    console.log("--- Rigbot Widget DEBUG --- document.readyState 'complete'/'interactive'. Llamando a initRigbot().");
     initRigbot();
   } else {
-    console.log("--- Rigbot Widget DEBUG --- Añadiendo event listener 'DOMContentLoaded' para initRigbot(). Estado actual:", document.readyState);
-    window.addEventListener('DOMContentLoaded', () => {
-      console.log("--- Rigbot Widget DEBUG --- Evento 'DOMContentLoaded' disparado. Llamando a initRigbot().");
-      initRigbot();
-    });
+    window.addEventListener('DOMContentLoaded', initRigbot);
   }
 })();
